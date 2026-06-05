@@ -1052,6 +1052,52 @@ def parse_money_value(v) -> float | None:
         return None
 
 
+def _strip_commas_text(v: str) -> str:
+    """全角/半角カンマを除去した文字列。"""
+    return str(v or "").replace(",", "").replace("，", "")
+
+
+def _format_number_no_comma(v: float) -> str:
+    """数値をカンマなし文字列で返す（整数優先）。"""
+    if abs(v - round(v)) < 1e-9:
+        return str(int(round(v)))
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def sanitize_edit_row_and_recalc_amount(row: dict[str, str]) -> dict[str, str]:
+    """修正画面の行を正規化し、金額=数量×単価を自動反映。"""
+    cleaned = dict(row)
+    for key in (
+        "伝票番号",
+        "日付",
+        "取引先",
+        "明細番号",
+        "商品名",
+        "数量",
+        "単価",
+        "合計金額",
+        "備考",
+    ):
+        cleaned[key] = _strip_commas_text(str(cleaned.get(key, ""))).strip()
+
+    qv = parse_money_value(cleaned.get("数量", ""))
+    uv = parse_money_value(cleaned.get("単価", ""))
+    if qv is not None and uv is not None:
+        cleaned["合計金額"] = _format_number_no_comma(qv * uv)
+    return cleaned
+
+
+def normalize_form1_amount_display(amount_str: str) -> str:
+    """帳票1の金額表示をカンマなし整数にそろえる。"""
+    s = normalize_text(str(amount_str or "").strip())
+    if not s or s == "検出できませんでした":
+        return s
+    v = parse_money_value(s)
+    if v is None:
+        return s.replace(",", "")
+    return str(int(round(v)))
+
+
 def _format_form2_quantity_display(v: float) -> str:
     """帳票2の数量（小数第1位まで）。"""
     r = round(v * 10) / 10.0
@@ -5443,6 +5489,9 @@ if nav_section == "仕入" and page == "伝票読み取り":
                 mid = str(item.get("明細番号", ""))
                 row_key = f"{idx}-{inv_no}-{mid}".strip("-")
                 raw_date = item.get("伝票日付", "") or parsed.get("伝票日付", "")
+                amount_value = item.get("金額", "")
+                if invoice_form_type == 1:
+                    amount_value = normalize_form1_amount_display(str(amount_value))
                 results.append(
                     {
                         "伝票番号": inv_no,
@@ -5452,7 +5501,7 @@ if nav_section == "仕入" and page == "伝票読み取り":
                         "商品名": item.get("商品名", ""),
                         "数量": item.get("数量", ""),
                         "単価": item.get("単価", ""),
-                        "合計金額": item.get("金額", ""),
+                        "合計金額": amount_value,
                         "備考": item.get("備考", ""),
                         "伝票番号(枚)": row_key or str(idx),
                         "ai_response": ai_raw,
@@ -5490,6 +5539,30 @@ if nav_section == "仕入" and page == "伝票読み取り":
                 "帳票3: 数量が個数欄（1,2,3…）のままの行があります。"
                 f" 明細番号 {', '.join(piece_like)} は **重量(kg)** 欄を確認してください。"
             )
+
+    if parse_to_table and invoice_form_type == 1 and results:
+        circled_pattern = re.compile(r"[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]")
+        marker_keys: list[str] = []
+        missing_marker_rows: list[str] = []
+        for row in results:
+            mid = str(row.get("明細番号") or "").strip()
+            m = circled_pattern.search(mid)
+            if m:
+                marker_keys.append(m.group())
+            else:
+                missing_marker_rows.append(mid or "?")
+        if missing_marker_rows:
+            st.warning(
+                "帳票1: 明細番号(①②③…)が読めていない行があります。"
+                f" 行: {', '.join(missing_marker_rows)}。商品数確認キーなので画像を再確認してください。"
+            )
+        if marker_keys:
+            dup = sorted({k for k in marker_keys if marker_keys.count(k) > 1})
+            if dup:
+                st.warning(
+                    "帳票1: 明細番号(①②③…)の重複があります。"
+                    f" 重複: {', '.join(dup)}。商品行の読み取り漏れ/取り違えを確認してください。"
+                )
 
     if parse_to_table:
         if results:
@@ -5596,9 +5669,13 @@ if nav_section == "仕入" and page == "伝票読み取り":
                     height=100,
                     key=f"ai_raw_{row_idx}_{row.get('伝票番号(枚)', fidx)}",
                 )
+                normalized = sanitize_edit_row_and_recalc_amount(row)
+                for k, v in normalized.items():
+                    row[k] = v
 
         if st.button("DBに保存"):
             rows_to_save = list(st.session_state.get("edited_results", results))
+            rows_to_save = [sanitize_edit_row_and_recalc_amount(r) for r in rows_to_save]
             client = get_supabase_client_for_writes()
             if not client:
                 st.error(
