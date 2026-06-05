@@ -92,21 +92,20 @@ INVOICE_FORM_OPTIONS: dict[int, dict[str, str]] = {
         "label": "帳票1：関東日本フード",
         "supplier": "関東日本フード（株）",
         "partner_hint": "関東日本フード",
-        "prompt_file": "invoice_form1.txt",
     },
     2: {
         "label": "帳票2：全農石川",
         "supplier": "全農石川",
         "partner_hint": "全農石川",
-        "prompt_file": "invoice_form2.txt",
     },
     3: {
         "label": "帳票3：天狗中田本店",
         "supplier": "（株）天狗中田本店",
         "partner_hint": "天狗中田本店",
-        "prompt_file": "invoice_form3.txt",
     },
 }
+
+_INVOICE_USER_PROMPT_FILE = "invoice_extraction_user.txt"
 
 
 def default_supplier_for_form_type(invoice_form_type: int) -> str:
@@ -121,13 +120,21 @@ def partner_hint_for_form_type(invoice_form_type: int) -> str:
     return meta["partner_hint"] if meta else "関東日本フード"
 
 
+def _extract_invoice_prompt_section(template: str, tag: str) -> str:
+    """invoice_extraction_user.txt 内の <<TAG>> セクションを取り出す。"""
+    pattern = rf"<<{re.escape(tag)}>>\s*(.*?)(?=<<[A-Z0-9_]+>>|\Z)"
+    m = re.search(pattern, template, flags=re.DOTALL)
+    if not m:
+        raise ValueError(f"プロンプトセクション <<{tag}>> が見つかりません: {_INVOICE_USER_PROMPT_FILE}")
+    return m.group(1).strip()
+
+
 def build_invoice_extraction_prompts(
     invoice_form_type: int,
     master_product_names: list[str] | None = None,
 ) -> tuple[str, str]:
     """伝票読み取り用の (user_prompt, system_prompt)。帳票種別は呼び出し側で指定。"""
-    meta = INVOICE_FORM_OPTIONS.get(invoice_form_type)
-    if not meta:
+    if invoice_form_type not in INVOICE_FORM_OPTIONS:
         raise ValueError("invoice_form_type は 1, 2, 3 のいずれかを指定してください。")
     master_block = ""
     if master_product_names:
@@ -139,12 +146,14 @@ def build_invoice_extraction_prompts(
                 listed=listed,
             )
     snap_hint = "。その後、上記【商品マスタとの整合】に従い登録名に寄せる。" if master_block else ""
-    form_file = meta["prompt_file"]
-    intro = load_prompt_text("invoice_extraction_intro.txt").format(
+    template = load_prompt_text(_INVOICE_USER_PROMPT_FILE)
+    intro = _extract_invoice_prompt_section(template, "COMMON_INTRO").format(
         invoice_form_type=invoice_form_type
     )
-    form_body = load_prompt_text(form_file).format(snap_hint=snap_hint)
-    footer = load_prompt_text("invoice_extraction_footer.txt")
+    form_body = _extract_invoice_prompt_section(template, f"FORM{invoice_form_type}").format(
+        snap_hint=snap_hint
+    )
+    footer = _extract_invoice_prompt_section(template, "COMMON_FOOTER")
     user_prompt = f"{intro}\n\n{form_body}\n\n{footer}{master_block}"
     system_prompt = load_prompt_text("invoice_extraction_system.txt").strip()
     return user_prompt, system_prompt
