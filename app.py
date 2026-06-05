@@ -5131,34 +5131,94 @@ if nav_section == "仕入" and page == "伝票読み取り":
     st.markdown(
         """
         <style>
-        .st-key-invoice_camera [data-testid="stCameraInput"],
+        /* 伝票撮影: 横持ち・スマホ/タブレット向けにプレビューを最大化 */
         .st-key-invoice_camera {
             width: 100% !important;
             max-width: 100% !important;
+            margin: 0 !important;
+        }
+        .st-key-invoice_camera [data-testid="stCameraInput"] {
+            position: relative !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: hidden !important;
         }
         .st-key-invoice_camera [data-testid="stCameraInput"] > div,
         .st-key-invoice_camera [data-testid="stCameraInput"] video,
         .st-key-invoice_camera [data-testid="stCameraInput"] img {
             width: 100% !important;
             max-width: 100% !important;
+            display: block !important;
         }
         .st-key-invoice_camera [data-testid="stCameraInput"] video,
         .st-key-invoice_camera [data-testid="stCameraInput"] img {
-            min-height: 56vh !important;
-            max-height: 78vh !important;
+            aspect-ratio: 16 / 9 !important;
+            min-height: min(72vh, calc(100vw * 9 / 16)) !important;
+            max-height: 85vh !important;
             height: auto !important;
-            aspect-ratio: 3 / 4 !important;
             object-fit: cover !important;
+            background: #000 !important;
         }
-        .stCameraInput button {
-            font-size: 20px !important;
-            padding: 15px 30px !important;
-            height: auto !important;
-            min-height: 60px !important;
+        .st-key-invoice_camera [data-testid="stCameraInput"] button {
+            position: absolute !important;
+            left: 50% !important;
+            bottom: 1.25rem !important;
+            transform: translateX(-50%) !important;
+            z-index: 30 !important;
+            margin: 0 !important;
+            font-size: 1.15rem !important;
+            font-weight: 700 !important;
+            padding: 0.9rem 2.2rem !important;
+            min-height: 3.25rem !important;
+            border-radius: 999px !important;
+            box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45) !important;
         }
-        .stCameraInput label {
-            font-size: 18px !important;
-            font-weight: bold !important;
+        @media (max-width: 1024px) {
+            section.main .block-container {
+                padding-top: 0.75rem !important;
+                padding-left: 0.35rem !important;
+                padding-right: 0.35rem !important;
+                max-width: 100% !important;
+            }
+            .st-key-invoice_camera {
+                width: calc(100% + 0.7rem) !important;
+                margin-left: -0.35rem !important;
+                margin-right: -0.35rem !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] {
+                min-height: calc(100dvh - 11rem) !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] video,
+            .st-key-invoice_camera [data-testid="stCameraInput"] img {
+                width: 100% !important;
+                height: calc(100dvh - 11rem) !important;
+                min-height: calc(100dvh - 11rem) !important;
+                max-height: calc(100dvh - 11rem) !important;
+                aspect-ratio: unset !important;
+                object-fit: cover !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] button {
+                bottom: 1rem !important;
+                font-size: 1.25rem !important;
+                padding: 1rem 2.6rem !important;
+                min-height: 3.5rem !important;
+            }
+        }
+        @media (max-width: 1024px) and (orientation: landscape) {
+            .st-key-invoice_camera [data-testid="stCameraInput"] {
+                min-height: calc(100dvh - 5.5rem) !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] video,
+            .st-key-invoice_camera [data-testid="stCameraInput"] img {
+                height: calc(100dvh - 5.5rem) !important;
+                min-height: calc(100dvh - 5.5rem) !important;
+                max-height: calc(100dvh - 5.5rem) !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] button {
+                bottom: 0.75rem !important;
+            }
         }
         </style>
         """,
@@ -5168,7 +5228,12 @@ if nav_section == "仕入" and page == "伝票読み取り":
     tab1, tab2 = st.tabs(["📷 カメラ", "📁 ファイル"])
     image = None
     with tab1:
-        camera_image = st.camera_input("撮影", key="invoice_camera", width="stretch")
+        camera_image = st.camera_input(
+            "撮影",
+            key="invoice_camera",
+            width="stretch",
+            label_visibility="collapsed",
+        )
         if camera_image:
             image = camera_image
     with tab2:
