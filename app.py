@@ -1064,6 +1064,15 @@ def _format_number_no_comma(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
+def calc_amount_from_qty_unit(qty: str, unit_price: str) -> str | None:
+    """数量・単価がそろっているときに金額(数量×単価)を返す。"""
+    qv = parse_money_value(_strip_commas_text(qty))
+    uv = parse_money_value(_strip_commas_text(unit_price))
+    if qv is None or uv is None:
+        return None
+    return _format_number_no_comma(qv * uv)
+
+
 def sanitize_edit_row_and_recalc_amount(row: dict[str, str]) -> dict[str, str]:
     """修正画面の行を正規化し、金額=数量×単価を自動反映。"""
     cleaned = dict(row)
@@ -5658,11 +5667,30 @@ if nav_section == "仕入" and page == "伝票読み取り":
                                 product_code_from_catalog(row.get("product_id"), product_catalog),
                             )
                         else:
-                            row[field] = st.text_input(
-                                field,
-                                value=row.get(field, ""),
-                                key=f"edit_{row_idx}_{row.get('伝票番号(枚)', fidx)}_{field}",
-                            )
+                            edit_key = f"edit_{row_idx}_{row.get('伝票番号(枚)', fidx)}_{field}"
+                            if field == "合計金額":
+                                calc_amount = calc_amount_from_qty_unit(
+                                    str(row.get("数量", "")),
+                                    str(row.get("単価", "")),
+                                )
+                                if calc_amount is not None:
+                                    row[field] = calc_amount
+                                else:
+                                    row[field] = _strip_commas_text(str(row.get(field, ""))).strip()
+                                st.session_state[edit_key] = row[field]
+                                row[field] = st.text_input(
+                                    field,
+                                    value=row[field],
+                                    key=edit_key,
+                                    disabled=True,
+                                    help="自動計算: 数量 × 単価",
+                                )
+                            else:
+                                row[field] = st.text_input(
+                                    field,
+                                    value=row.get(field, ""),
+                                    key=edit_key,
+                                )
                 row["ai_response"] = st.text_area(
                     "AI応答",
                     value=row.get("ai_response", ""),
