@@ -1170,6 +1170,130 @@ def normalize_form2_quantity_display(qty_str: str) -> str:
     return _format_form2_quantity_display(v) if v is not None else s
 
 
+def normalize_form2_invoice_number(raw: str) -> str:
+    """帳票2の伝票番号を6桁にそろえる。3桁や日付っぽい誤読は空にする。"""
+    s = normalize_text(str(raw or "").strip())
+    if not s or s == "検出できませんでした":
+        return ""
+    digits = re.sub(r"[^\d]", "", s)
+    if len(digits) == 6:
+        return digits
+    if len(digits) > 6:
+        m = re.search(r"\d{6}", digits)
+        return m.group() if m else ""
+    return ""
+
+
+def maybe_fix_form2_column_swap(row: dict[str, str]) -> dict[str, str]:
+    """数量と原単価の列取り違え（数量に1350、単価に9.9 など）を補正。"""
+    r = dict(row)
+    qty_raw = str(r.get("数量") or "")
+    unit_raw = str(r.get("単価") or "")
+    amt_raw = str(r.get("金額") or "")
+    qv = parse_money_value(qty_raw)
+    pv = parse_money_value(unit_raw)
+    av = parse_money_value(amt_raw)
+    if qv is None or pv is None:
+        return r
+
+    qty_digits = re.sub(r"[^\d]", "", qty_raw)
+    qty_looks_like_price = qv >= 80 or len(qty_digits) >= 4
+    unit_looks_like_qty = 0 < pv <= 80
+    if qty_looks_like_price and unit_looks_like_qty:
+        r["数量"] = normalize_form2_quantity_display(unit_raw)
+        r["単価"] = normalize_form2_unit_price_display(qty_raw)
+        return r
+
+    if qv >= 80 and pv > 0 and av:
+        implied_q = round((av / pv) * 10) / 10.0
+        if 0.1 <= implied_q <= 80:
+            swapped_unit = normalize_form2_unit_price_display(qty_raw)
+            sp = parse_money_value(swapped_unit)
+            if sp and abs(av - implied_q * sp) < abs(av - qv * pv) * 0.5:
+                r["数量"] = normalize_form2_quantity_display(str(implied_q))
+                r["単価"] = swapped_unit
+    return r
+
+
+def _form2_invoice_number_candidates(rows: list[dict[str, str]]) -> list[str]:
+    found: list[str] = []
+    for row in rows:
+        digits = re.sub(r"[^\d]", "", str(row.get("伝票番号") or ""))
+        if len(digits) == 6:
+            found.append(digits)
+        elif len(digits) > 6:
+            m = re.search(r"\d{6}", digits)
+            if m:
+                found.append(m.group())
+    return found
+
+
+def apply_form2_invoice_number_to_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """明細行に伝票番号6桁を統一して付与する。"""
+    candidates = _form2_invoice_number_candidates(rows)
+    if not candidates:
+        return rows
+    best = max(candidates, key=lambda x: (candidates.count(x), x))
+    out: list[dict[str, str]] = []
+    for row in rows:
+        r = dict(row)
+        r["伝票番号"] = best
+        out.append(r)
+    return out
+
+
+def score_form2_rows(rows: list[dict[str, str]]) -> float:
+    """帳票2の読取品質スコア（高いほど正しい向き・列の可能性が高い）。"""
+    if not rows:
+        return -100.0
+    score = 0.0
+    inv_candidates = _form2_invoice_number_candidates(rows)
+    if inv_candidates:
+        score += 35
+    else:
+        short = [
+            re.sub(r"[^\d]", "", str(r.get("伝票番号") or ""))
+            for r in rows
+            if re.sub(r"[^\d]", "", str(r.get("伝票番号") or ""))
+        ]
+        if any(len(d) == 3 for d in short):
+            score -= 25
+    for row in rows:
+        q = parse_money_value(str(row.get("数量") or ""))
+        p = parse_money_value(str(row.get("単価") or ""))
+        a = parse_money_value(str(row.get("金額") or ""))
+        if q is not None and q > 80:
+            score -= 12
+        if p is not None and 0 < p < 80 and "." in str(row.get("単価") or ""):
+            score -= 8
+        if q and p and a and p > 0:
+            err = abs(a - q * p) / max(a, 1)
+            if err < 0.06:
+                score += 18
+            elif err < 0.2:
+                score += 6
+            else:
+                score -= 4
+    return score
+
+
+def form2_orientation_degrees(img: Image.Image) -> list[int]:
+    """帳票2向けに試す回転角度（0=そのまま）。"""
+    w, h = img.size
+    if w > h * 1.08:
+        return [90, 0, 270]
+    if h > w * 1.08:
+        return [0, 90, 270]
+    return [0, 90, 270]
+
+
+def rotate_invoice_image(img: Image.Image, degrees: int) -> Image.Image:
+    """伝票画像を回転（expand=True）。"""
+    if degrees % 360 == 0:
+        return img
+    return img.rotate(degrees, expand=True)
+
+
 def maybe_fix_form2_quantity_from_amount(
     qty_str: str, unit_price_str: str, amount_str: str
 ) -> str:
@@ -1195,6 +1319,8 @@ def apply_form2_postprocess(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for row in rows:
         r = dict(row)
+        r["伝票番号"] = normalize_form2_invoice_number(str(r.get("伝票番号") or ""))
+        r = maybe_fix_form2_column_swap(r)
         unit = normalize_form2_unit_price_display(str(r.get("単価") or ""))
         r["単価"] = unit
         amt = normalize_form2_amount_display(str(r.get("金額") or ""))
@@ -1205,7 +1331,7 @@ def apply_form2_postprocess(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         qty = normalize_form2_quantity_display(str(r.get("数量") or ""))
         r["数量"] = maybe_fix_form2_quantity_from_amount(qty, unit, amt)
         out.append(r)
-    return out
+    return apply_form2_invoice_number_to_rows(out)
 
 
 def _form3_line_numbers(rows: list[dict]) -> list[int]:
@@ -4970,12 +5096,12 @@ def openai_vision_chat(
     return content
 
 
-def extract_invoice_data_from_image_with_ai(
+def _vision_extract_invoice_rows(
     img: Image.Image,
     api_key: str,
     invoice_form_type: int,
-    model: str = "gpt-4o-mini",
-    master_product_names: list[str] | None = None,
+    model: str,
+    master_product_names: list[str] | None,
 ) -> tuple[list[dict[str, str]], str]:
     data_url = image_to_jpeg_data_url(img)
     prompt, system_prompt = build_invoice_extraction_prompts(
@@ -4995,18 +5121,80 @@ def extract_invoice_data_from_image_with_ai(
         raise RuntimeError("AI応答のJSONに有効な明細がありませんでした。")
     if invoice_form_type == 2:
         parsed_rows = apply_form2_postprocess(parsed_rows)
+    return parsed_rows, content
+
+
+def _extract_form2_with_best_orientation(
+    img: Image.Image,
+    api_key: str,
+    model: str,
+    master_product_names: list[str] | None,
+) -> tuple[list[dict[str, str]], str]:
+    """帳票2: 回転候補を試し、伝票番号・数量列が最も妥当な向きを採用。"""
+    best_rows: list[dict[str, str]] | None = None
+    best_content = ""
+    best_score = -1e9
+    best_angle = 0
+    for angle in form2_orientation_degrees(img):
+        trial_img = rotate_invoice_image(img, angle)
+        try:
+            rows, content = _vision_extract_invoice_rows(
+                trial_img,
+                api_key,
+                2,
+                model,
+                master_product_names,
+            )
+        except RuntimeError:
+            continue
+        score = score_form2_rows(rows)
+        if score > best_score:
+            best_score = score
+            best_rows = rows
+            best_content = content
+            best_angle = angle
+        if score >= 42:
+            break
+    if best_rows is None:
+        raise RuntimeError("帳票2の読み取りに失敗しました（全ての向きで明細を取得できませんでした）。")
+    if best_angle:
+        best_content = (
+            f"{best_content}\n\n--- 向き補正: 画像を {best_angle}° 回転して読み取り ---"
+        )
+    return best_rows, best_content
+
+
+def extract_invoice_data_from_image_with_ai(
+    img: Image.Image,
+    api_key: str,
+    invoice_form_type: int,
+    model: str = "gpt-4o-mini",
+    master_product_names: list[str] | None = None,
+) -> tuple[list[dict[str, str]], str]:
+    if invoice_form_type == 2:
+        parsed_rows, content = _extract_form2_with_best_orientation(
+            img, api_key, model, master_product_names
+        )
+    else:
+        parsed_rows, content = _vision_extract_invoice_rows(
+            img, api_key, invoice_form_type, model, master_product_names
+        )
     if invoice_form_type == 3:
         parsed_rows = apply_form3_postprocess(parsed_rows)
         should_retry, retry_reason = form3_should_retry_completion(parsed_rows)
         if should_retry:
             try:
+                retry_data_url = image_to_jpeg_data_url(img)
+                _prompt, retry_system_prompt = build_invoice_extraction_prompts(
+                    invoice_form_type, master_product_names
+                )
                 retry_prompt = build_form3_retry_prompt(len(parsed_rows), retry_reason)
                 content_retry = openai_vision_chat(
                     api_key,
                     model,
-                    system_prompt,
+                    retry_system_prompt,
                     retry_prompt,
-                    data_url,
+                    retry_data_url,
                     timeout=75,
                 )
                 data_retry = _extract_json_block(content_retry)
