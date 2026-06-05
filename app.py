@@ -4685,6 +4685,22 @@ def estimate_vertical_slip_count(img: Image.Image, max_slips: int = 6) -> int:
     return max(1, min(slips, max_slips))
 
 
+_INVOICE_CAMERA_B64_KEY = "invoice_captured_image_b64"
+_INVOICE_CAMERA_RETAKE_SENTINEL = "__INVOICE_CAMERA_RETAKE__"
+
+
+def _decode_invoice_camera_b64(encoded: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
+
+
+def _clear_invoice_camera_capture() -> None:
+    st.session_state.pop(_INVOICE_CAMERA_B64_KEY, None)
+    st.session_state.pop("invoice_ai_read_cache_key", None)
+    st.session_state.pop("invoice_ai_read_results", None)
+    st.session_state.pop("invoice_ai_read_note", None)
+    st.session_state.pop("invoice_ai_combined_ai", None)
+
+
 def render_document_camera_capture() -> Image.Image | None:
     """背面カメラ優先・縦持ちで大きく表示する伝票撮影UI。"""
     camera_html = """
@@ -4855,15 +4871,40 @@ def render_document_camera_capture() -> Image.Image | None:
         resizeFrame();
       }
 
+      function buildCaptureDataUrl() {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const maxDim = 1600;
+        let tw = vw;
+        let th = vh;
+        if (vw > maxDim || vh > maxDim) {
+          if (vw >= vh) {
+            tw = maxDim;
+            th = Math.round(vh * maxDim / vw);
+          } else {
+            th = maxDim;
+            tw = Math.round(vw * maxDim / vh);
+          }
+        }
+        canvas.width = tw;
+        canvas.height = th;
+        canvas.getContext("2d").drawImage(video, 0, 0, tw, th);
+        return canvas.toDataURL("image/jpeg", 0.82);
+      }
+
+      function sendToStreamlit(value) {
+        const streamlit = window.Streamlit || window.parent.Streamlit;
+        if (streamlit && typeof streamlit.setComponentValue === "function") {
+          streamlit.setComponentValue(value);
+        }
+      }
+
       captureBtn.addEventListener("click", () => {
         if (!video.videoWidth || !video.videoHeight) {
           setStatus("カメラの準備中です。少し待ってから撮影してください。");
           return;
         }
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext("2d").drawImage(video, 0, 0);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        const dataUrl = buildCaptureDataUrl();
         preview.src = dataUrl;
         preview.style.display = "block";
         video.style.display = "none";
@@ -4874,8 +4915,8 @@ def render_document_camera_capture() -> Image.Image | None:
           stream.getTracks().forEach((track) => track.stop());
           stream = null;
         }
-        setStatus("");
-        Streamlit.setComponentValue(dataUrl);
+        setStatus("撮影しました。読み取り中…");
+        sendToStreamlit(dataUrl);
         resizeFrame();
       });
 
@@ -4885,7 +4926,7 @@ def render_document_camera_capture() -> Image.Image | None:
       });
 
       retakeBtn.addEventListener("click", () => {
-        Streamlit.setComponentValue(null);
+        sendToStreamlit("__INVOICE_CAMERA_RETAKE__");
         startCamera();
       });
 
@@ -4897,9 +4938,21 @@ def render_document_camera_capture() -> Image.Image | None:
     </script>
     """
     result = components.html(camera_html, height=640, scrolling=False)
+    if result == _INVOICE_CAMERA_RETAKE_SENTINEL:
+        _clear_invoice_camera_capture()
+        return None
     if isinstance(result, str) and result.startswith("data:image"):
         _header, encoded = result.split(",", 1)
-        return Image.open(io.BytesIO(base64.b64decode(encoded)))
+        if st.session_state.get(_INVOICE_CAMERA_B64_KEY) != encoded:
+            st.session_state.pop("invoice_ai_read_cache_key", None)
+            st.session_state.pop("invoice_ai_read_results", None)
+            st.session_state.pop("invoice_ai_read_note", None)
+            st.session_state.pop("invoice_ai_combined_ai", None)
+        st.session_state[_INVOICE_CAMERA_B64_KEY] = encoded
+        return _decode_invoice_camera_b64(encoded)
+    cached_b64 = st.session_state.get(_INVOICE_CAMERA_B64_KEY)
+    if cached_b64:
+        return _decode_invoice_camera_b64(cached_b64)
     return None
 
 
@@ -5374,9 +5427,11 @@ if nav_section == "仕入" and page == "伝票読み取り":
         camera_image = render_document_camera_capture()
         if camera_image:
             image = camera_image
+            st.success("撮影しました。下のエリアで AI 読み取りを実行します。")
     with tab2:
         uploaded_file = st.file_uploader("画像", type=["png", "jpg", "jpeg", "bmp", "tiff"])
         if uploaded_file:
+            _clear_invoice_camera_capture()
             image = Image.open(uploaded_file)
 
     if not image:
