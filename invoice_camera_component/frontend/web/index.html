@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: sans-serif;
+    }
+    #wrap {
+      position: relative;
+      width: 100%;
+      height: 520px;
+      min-height: 420px;
+      background: #000;
+      overflow: hidden;
+    }
+    #video, #preview {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      background: #000;
+    }
+    #preview { display: none; }
+    #toolbar {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      padding: 1rem 0.75rem 1.1rem;
+      background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.55) 100%);
+      z-index: 5;
+    }
+    button {
+      border: 0;
+      border-radius: 999px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      padding: 0.85rem 1.6rem;
+      box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+      cursor: pointer;
+    }
+    #capture {
+      background: #ff4b4b;
+      color: #fff;
+      min-width: 7.5rem;
+    }
+    #switch, #retake {
+      background: rgba(255, 255, 255, 0.92);
+      color: #111;
+    }
+    #status {
+      position: absolute;
+      top: 0.75rem;
+      left: 0.75rem;
+      right: 0.75rem;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.45);
+      border-radius: 0.5rem;
+      padding: 0.45rem 0.65rem;
+      font-size: 0.85rem;
+      z-index: 6;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="status"></div>
+    <video id="video" autoplay playsinline muted></video>
+    <img id="preview" alt="preview" />
+    <div id="toolbar">
+      <button id="switch" type="button">🔄 カメラ切替</button>
+      <button id="capture" type="button">撮影</button>
+      <button id="retake" type="button" style="display:none;">撮り直し</button>
+    </div>
+  </div>
+  <canvas id="canvas" style="display:none;"></canvas>
+
+  <script>
+    function sendToStreamlit(type, data) {
+      window.parent.postMessage(
+        Object.assign({ isStreamlitMessage: true, type: type }, data),
+        "*"
+      );
+    }
+
+    const Streamlit = {
+      RENDER_EVENT: "streamlit:render",
+      events: {
+        _handlers: {},
+        addEventListener(eventName, handler) {
+          if (!this._handlers[eventName]) {
+            this._handlers[eventName] = [];
+          }
+          this._handlers[eventName].push(handler);
+        },
+        dispatchEvent(event) {
+          const handlers = this._handlers[event.type] || [];
+          handlers.forEach((handler) => handler(event));
+        },
+      },
+      setComponentReady() {
+        sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+      },
+      setComponentValue(value) {
+        sendToStreamlit("streamlit:setComponentValue", {
+          value: value,
+          dataType: "json",
+        });
+      },
+      setFrameHeight(height) {
+        sendToStreamlit("streamlit:setFrameHeight", { height: height });
+      },
+    };
+
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (data && data.type === Streamlit.RENDER_EVENT) {
+        Streamlit.events.dispatchEvent({
+          type: Streamlit.RENDER_EVENT,
+          detail: data,
+        });
+      }
+    });
+
+    const video = document.getElementById("video");
+    const preview = document.getElementById("preview");
+    const canvas = document.getElementById("canvas");
+    const captureBtn = document.getElementById("capture");
+    const switchBtn = document.getElementById("switch");
+    const retakeBtn = document.getElementById("retake");
+    const statusEl = document.getElementById("status");
+    let stream = null;
+    let facingMode = "environment";
+    let cameraStarted = false;
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+      statusEl.style.display = message ? "block" : "none";
+    }
+
+    function getViewportSize() {
+      try {
+        const parent = window.parent;
+        if (parent && parent !== window) {
+          return {
+            width: parent.innerWidth || window.innerWidth,
+            height: parent.innerHeight || window.innerHeight,
+          };
+        }
+      } catch (err) {}
+      return { width: window.innerWidth, height: window.innerHeight };
+    }
+
+    function applyLayout() {
+      const wrap = document.getElementById("wrap");
+      const { width, height } = getViewportSize();
+      const isLandscape = width > height;
+      const target = Math.round(isLandscape ? height * 0.84 : height * 0.74);
+      wrap.style.height = `${Math.max(target, 420)}px`;
+    }
+
+    function resizeFrame() {
+      applyLayout();
+      const wrap = document.getElementById("wrap");
+      const frameHeight = Math.ceil(wrap.getBoundingClientRect().height + 8);
+      Streamlit.setFrameHeight(frameHeight);
+    }
+
+    async function startCamera() {
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+      }
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+      };
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+          setStatus("背面カメラを使えないため、利用可能なカメラを表示しています。");
+        } catch (fallbackErr) {
+          setStatus("カメラを起動できませんでした。ブラウザのカメラ許可を確認してください。");
+          return;
+        }
+      }
+      video.style.display = "block";
+      preview.style.display = "none";
+      captureBtn.style.display = "inline-block";
+      switchBtn.style.display = "inline-block";
+      retakeBtn.style.display = "none";
+      video.srcObject = stream;
+      setStatus(
+        facingMode === "environment"
+          ? "背面カメラで撮影できます。"
+          : "前面カメラで撮影しています。"
+      );
+      resizeFrame();
+    }
+
+    function buildCaptureDataUrl() {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const maxDim = 1600;
+      let tw = vw;
+      let th = vh;
+      if (vw > maxDim || vh > maxDim) {
+        if (vw >= vh) {
+          tw = maxDim;
+          th = Math.round(vh * maxDim / vw);
+        } else {
+          th = maxDim;
+          tw = Math.round(vw * maxDim / vh);
+        }
+      }
+      canvas.width = tw;
+      canvas.height = th;
+      canvas.getContext("2d").drawImage(video, 0, 0, tw, th);
+      return canvas.toDataURL("image/jpeg", 0.82);
+    }
+
+    captureBtn.addEventListener("click", () => {
+      if (!video.videoWidth || !video.videoHeight) {
+        setStatus("カメラの準備中です。少し待ってから撮影してください。");
+        return;
+      }
+      const dataUrl = buildCaptureDataUrl();
+      preview.src = dataUrl;
+      preview.style.display = "block";
+      video.style.display = "none";
+      captureBtn.style.display = "none";
+      switchBtn.style.display = "none";
+      retakeBtn.style.display = "inline-block";
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+      }
+      setStatus("撮影しました。AI 読み取りを開始します。");
+      Streamlit.setComponentValue(dataUrl);
+      resizeFrame();
+    });
+
+    switchBtn.addEventListener("click", () => {
+      facingMode = facingMode === "environment" ? "user" : "environment";
+      startCamera();
+    });
+
+    retakeBtn.addEventListener("click", () => {
+      Streamlit.setComponentValue(null);
+      startCamera();
+    });
+
+    window.addEventListener("resize", resizeFrame);
+    window.addEventListener("orientationchange", () => {
+      setTimeout(resizeFrame, 250);
+    });
+
+    function onRender() {
+      resizeFrame();
+      if (!cameraStarted) {
+        cameraStarted = true;
+        startCamera();
+      }
+    }
+
+    Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+    Streamlit.setComponentReady();
+    Streamlit.setFrameHeight(640);
+  </script>
+</body>
+</html>

@@ -9,7 +9,7 @@ from pathlib import Path
 import streamlit.components.v1 as components
 from PIL import Image
 
-_COMPONENT_DIR = Path(__file__).parent / "frontend" / "build"
+_COMPONENT_DIR = Path(__file__).parent / "frontend" / "web"
 _invoice_camera_component = components.declare_component(
     "invoice_camera_capture",
     path=str(_COMPONENT_DIR.resolve()),
