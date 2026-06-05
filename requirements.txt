@@ -1,0 +1,4 @@
+streamlit
+Pillow
+python-dotenv
+supabase>=2.0.0
