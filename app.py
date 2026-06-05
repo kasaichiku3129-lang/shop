@@ -19,6 +19,8 @@ from PIL import Image, ImageOps
 import streamlit as st
 from supabase import Client, create_client
 
+from invoice_camera_component import capture_invoice_camera_image
+
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 SUPABASE_TABLE_PURCHASES = os.getenv("SUPABASE_PURCHASES_TABLE", "purchases")
@@ -5140,34 +5142,10 @@ if nav_section == "仕入" and page == "伝票読み取り":
     st.markdown(
         """
         <style>
-        .st-key-invoice_camera [data-testid="stCameraInput"],
-        .st-key-invoice_camera {
+        .st-key-invoice_live_camera,
+        .st-key-invoice_live_camera iframe {
             width: 100% !important;
             max-width: 100% !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] {
-            position: relative !important;
-            overflow: hidden !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] video,
-        .st-key-invoice_camera [data-testid="stCameraInput"] img {
-            width: 100% !important;
-            max-width: 100% !important;
-            display: block !important;
-            object-fit: cover !important;
-            background: #000 !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] button {
-            position: absolute !important;
-            left: 50% !important;
-            bottom: 1rem !important;
-            transform: translateX(-50%) !important;
-            z-index: 20 !important;
-            font-size: 1.1rem !important;
-            font-weight: 700 !important;
-            padding: 0.85rem 2rem !important;
-            border-radius: 999px !important;
-            box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45) !important;
         }
         @media (max-width: 1024px) {
             section.main .block-container {
@@ -5175,27 +5153,6 @@ if nav_section == "仕入" and page == "伝票読み取り":
                 padding-left: 0.25rem !important;
                 padding-right: 0.25rem !important;
                 max-width: 100% !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] {
-                min-height: calc(100dvh - 14rem) !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] video,
-            .st-key-invoice_camera [data-testid="stCameraInput"] img {
-                height: calc(100dvh - 14rem) !important;
-                min-height: calc(100dvh - 14rem) !important;
-                max-height: calc(100dvh - 14rem) !important;
-                aspect-ratio: unset !important;
-            }
-        }
-        @media (max-width: 1024px) and (orientation: landscape) {
-            .st-key-invoice_camera [data-testid="stCameraInput"] {
-                min-height: calc(100dvh - 6rem) !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] video,
-            .st-key-invoice_camera [data-testid="stCameraInput"] img {
-                height: calc(100dvh - 6rem) !important;
-                min-height: calc(100dvh - 6rem) !important;
-                max-height: calc(100dvh - 6rem) !important;
             }
         }
         </style>
@@ -5207,28 +5164,12 @@ if nav_section == "仕入" and page == "伝票読み取り":
     image = None
     with tab1:
         st.caption(
-            "スマホ・タブレットでは **「カメラアプリで撮影」** を使うと背面カメラで全画面撮影でき、"
-            "横・縦どちらの向きでも読み取れます。"
+            "画面内で撮影し **「撮影」** を押すと、その場で AI 読み取りが始まります。"
+            "背面カメラが使えない場合は **🔄 カメラ切替** を押してください。"
         )
-        mobile_capture = st.file_uploader(
-            "📷 カメラアプリで撮影（推奨）",
-            type=["png", "jpg", "jpeg"],
-            key="invoice_mobile_camera",
-            help="スマホではカメラアプリが開きます。撮影後に自動で AI 読み取りを開始します。",
-        )
-        st.divider()
-        st.caption("またはブラウザ内カメラで撮影")
-        camera_image = st.camera_input(
-            "撮影",
-            key="invoice_camera",
-            width="stretch",
-            label_visibility="collapsed",
-        )
-        if mobile_capture:
-            image = load_invoice_image(mobile_capture)
-            st.success("撮影画像を受け取りました。AI 読み取りを開始します。")
-        elif camera_image:
-            image = load_invoice_image(camera_image)
+        live_capture = capture_invoice_camera_image(key="invoice_live_camera")
+        if live_capture:
+            image = load_invoice_image(live_capture)
             st.success("撮影しました。AI 読み取りを開始します。")
     with tab2:
         uploaded_file = st.file_uploader("画像", type=["png", "jpg", "jpeg", "bmp", "tiff"])
