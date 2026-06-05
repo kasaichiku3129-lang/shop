@@ -15,9 +15,8 @@ from difflib import SequenceMatcher
 from urllib import request, error
 
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageOps
 import streamlit as st
-import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -4685,275 +4684,13 @@ def estimate_vertical_slip_count(img: Image.Image, max_slips: int = 6) -> int:
     return max(1, min(slips, max_slips))
 
 
-_INVOICE_CAMERA_B64_KEY = "invoice_captured_image_b64"
-_INVOICE_CAMERA_RETAKE_SENTINEL = "__INVOICE_CAMERA_RETAKE__"
-
-
-def _decode_invoice_camera_b64(encoded: str) -> Image.Image:
-    return Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
-
-
-def _clear_invoice_camera_capture() -> None:
-    st.session_state.pop(_INVOICE_CAMERA_B64_KEY, None)
-    st.session_state.pop("invoice_ai_read_cache_key", None)
-    st.session_state.pop("invoice_ai_read_results", None)
-    st.session_state.pop("invoice_ai_read_note", None)
-    st.session_state.pop("invoice_ai_combined_ai", None)
-
-
-def render_document_camera_capture() -> Image.Image | None:
-    """背面カメラ優先・縦持ちで大きく表示する伝票撮影UI。"""
-    camera_html = """
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-        background: #000;
-      }
-      #wrap {
-        position: relative;
-        width: 100%;
-        height: 520px;
-        min-height: 420px;
-        background: #000;
-        overflow: hidden;
-      }
-      #video, #preview {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
-        background: #000;
-      }
-      #preview { display: none; }
-      #toolbar {
-        position: absolute;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        display: flex;
-        justify-content: center;
-        gap: 0.75rem;
-        padding: 1rem 0.75rem 1.1rem;
-        background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.55) 100%);
-        z-index: 5;
-      }
-      button {
-        border: 0;
-        border-radius: 999px;
-        font-size: 1.05rem;
-        font-weight: 700;
-        padding: 0.85rem 1.6rem;
-        box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
-        cursor: pointer;
-      }
-      #capture {
-        background: #ff4b4b;
-        color: #fff;
-        min-width: 7.5rem;
-      }
-      #switch, #retake {
-        background: rgba(255, 255, 255, 0.92);
-        color: #111;
-      }
-      #status {
-        position: absolute;
-        top: 0.75rem;
-        left: 0.75rem;
-        right: 0.75rem;
-        color: #fff;
-        background: rgba(0, 0, 0, 0.45);
-        border-radius: 0.5rem;
-        padding: 0.45rem 0.65rem;
-        font-size: 0.85rem;
-        z-index: 6;
-        display: none;
-      }
-    </style>
-    <div id="wrap">
-      <div id="status"></div>
-      <video id="video" autoplay playsinline muted></video>
-      <img id="preview" alt="preview" />
-      <div id="toolbar">
-        <button id="switch" type="button">🔄 カメラ切替</button>
-        <button id="capture" type="button">撮影</button>
-        <button id="retake" type="button" style="display:none;">撮り直し</button>
-      </div>
-    </div>
-    <canvas id="canvas" style="display:none;"></canvas>
-    <script>
-      const video = document.getElementById("video");
-      const preview = document.getElementById("preview");
-      const canvas = document.getElementById("canvas");
-      const captureBtn = document.getElementById("capture");
-      const switchBtn = document.getElementById("switch");
-      const retakeBtn = document.getElementById("retake");
-      const statusEl = document.getElementById("status");
-      let stream = null;
-      let facingMode = "environment";
-
-      function setStatus(message) {
-        statusEl.textContent = message;
-        statusEl.style.display = message ? "block" : "none";
-      }
-
-      function getViewportSize() {
-        try {
-          const parent = window.parent;
-          if (parent && parent !== window) {
-            return {
-              width: parent.innerWidth || window.innerWidth,
-              height: parent.innerHeight || window.innerHeight,
-            };
-          }
-        } catch (err) {
-          /* 親画面のサイズが読めない環境では iframe 自身のサイズを使う */
-        }
-        return { width: window.innerWidth, height: window.innerHeight };
-      }
-
-      function applyLayout() {
-        const wrap = document.getElementById("wrap");
-        const { width, height } = getViewportSize();
-        const isLandscape = width > height;
-        const target = Math.round(
-          isLandscape ? height * 0.84 : height * 0.74
-        );
-        wrap.style.height = `${Math.max(target, 420)}px`;
-      }
-
-      function resizeFrame() {
-        applyLayout();
-        const wrap = document.getElementById("wrap");
-        const frameHeight = Math.ceil(wrap.getBoundingClientRect().height + 8);
-        window.parent.postMessage(
-          { type: "streamlit:setFrameHeight", height: frameHeight },
-          "*"
-        );
-      }
-
-      async function startCamera() {
-        if (stream) {
-          stream.getTracks().forEach((track) => track.stop());
-          stream = null;
-        }
-        const constraints = {
-          audio: false,
-          video: {
-            facingMode: { ideal: facingMode },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-        };
-        try {
-          stream = await navigator.mediaDevices.getUserMedia(constraints);
-        } catch (err) {
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
-            setStatus("背面カメラを使えないため、利用可能なカメラを表示しています。");
-          } catch (fallbackErr) {
-            setStatus("カメラを起動できませんでした。ブラウザのカメラ許可を確認してください。");
-            return;
-          }
-        }
-        video.style.display = "block";
-        preview.style.display = "none";
-        captureBtn.style.display = "inline-block";
-        switchBtn.style.display = "inline-block";
-        retakeBtn.style.display = "none";
-        video.srcObject = stream;
-        setStatus(
-          facingMode === "environment"
-            ? "背面カメラで撮影できます。"
-            : "前面カメラで撮影しています。"
-        );
-        resizeFrame();
-      }
-
-      function buildCaptureDataUrl() {
-        const vw = video.videoWidth;
-        const vh = video.videoHeight;
-        const maxDim = 1600;
-        let tw = vw;
-        let th = vh;
-        if (vw > maxDim || vh > maxDim) {
-          if (vw >= vh) {
-            tw = maxDim;
-            th = Math.round(vh * maxDim / vw);
-          } else {
-            th = maxDim;
-            tw = Math.round(vw * maxDim / vh);
-          }
-        }
-        canvas.width = tw;
-        canvas.height = th;
-        canvas.getContext("2d").drawImage(video, 0, 0, tw, th);
-        return canvas.toDataURL("image/jpeg", 0.82);
-      }
-
-      function sendToStreamlit(value) {
-        const streamlit = window.Streamlit || window.parent.Streamlit;
-        if (streamlit && typeof streamlit.setComponentValue === "function") {
-          streamlit.setComponentValue(value);
-        }
-      }
-
-      captureBtn.addEventListener("click", () => {
-        if (!video.videoWidth || !video.videoHeight) {
-          setStatus("カメラの準備中です。少し待ってから撮影してください。");
-          return;
-        }
-        const dataUrl = buildCaptureDataUrl();
-        preview.src = dataUrl;
-        preview.style.display = "block";
-        video.style.display = "none";
-        captureBtn.style.display = "none";
-        switchBtn.style.display = "none";
-        retakeBtn.style.display = "inline-block";
-        if (stream) {
-          stream.getTracks().forEach((track) => track.stop());
-          stream = null;
-        }
-        setStatus("撮影しました。読み取り中…");
-        sendToStreamlit(dataUrl);
-        resizeFrame();
-      });
-
-      switchBtn.addEventListener("click", () => {
-        facingMode = facingMode === "environment" ? "user" : "environment";
-        startCamera();
-      });
-
-      retakeBtn.addEventListener("click", () => {
-        sendToStreamlit("__INVOICE_CAMERA_RETAKE__");
-        startCamera();
-      });
-
-      window.addEventListener("resize", resizeFrame);
-      window.addEventListener("orientationchange", () => {
-        setTimeout(resizeFrame, 250);
-      });
-      startCamera().then(resizeFrame);
-    </script>
-    """
-    result = components.html(camera_html, height=640, scrolling=False)
-    if result == _INVOICE_CAMERA_RETAKE_SENTINEL:
-        _clear_invoice_camera_capture()
-        return None
-    if isinstance(result, str) and result.startswith("data:image"):
-        _header, encoded = result.split(",", 1)
-        if st.session_state.get(_INVOICE_CAMERA_B64_KEY) != encoded:
-            st.session_state.pop("invoice_ai_read_cache_key", None)
-            st.session_state.pop("invoice_ai_read_results", None)
-            st.session_state.pop("invoice_ai_read_note", None)
-            st.session_state.pop("invoice_ai_combined_ai", None)
-        st.session_state[_INVOICE_CAMERA_B64_KEY] = encoded
-        return _decode_invoice_camera_b64(encoded)
-    cached_b64 = st.session_state.get(_INVOICE_CAMERA_B64_KEY)
-    if cached_b64:
-        return _decode_invoice_camera_b64(cached_b64)
-    return None
+def load_invoice_image(source: Image.Image | io.BytesIO | str | bytes) -> Image.Image:
+    """伝票画像を読み込み、EXIF の向きを補正して RGB にする（横撮影対応）。"""
+    if isinstance(source, Image.Image):
+        img = source
+    else:
+        img = Image.open(source)
+    return ImageOps.exif_transpose(img).convert("RGB")
 
 
 def _read_invoice_image_segments(
@@ -5403,6 +5140,35 @@ if nav_section == "仕入" and page == "伝票読み取り":
     st.markdown(
         """
         <style>
+        .st-key-invoice_camera [data-testid="stCameraInput"],
+        .st-key-invoice_camera {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        .st-key-invoice_camera [data-testid="stCameraInput"] {
+            position: relative !important;
+            overflow: hidden !important;
+        }
+        .st-key-invoice_camera [data-testid="stCameraInput"] video,
+        .st-key-invoice_camera [data-testid="stCameraInput"] img {
+            width: 100% !important;
+            max-width: 100% !important;
+            display: block !important;
+            object-fit: cover !important;
+            background: #000 !important;
+        }
+        .st-key-invoice_camera [data-testid="stCameraInput"] button {
+            position: absolute !important;
+            left: 50% !important;
+            bottom: 1rem !important;
+            transform: translateX(-50%) !important;
+            z-index: 20 !important;
+            font-size: 1.1rem !important;
+            font-weight: 700 !important;
+            padding: 0.85rem 2rem !important;
+            border-radius: 999px !important;
+            box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45) !important;
+        }
         @media (max-width: 1024px) {
             section.main .block-container {
                 padding-top: 0.5rem !important;
@@ -5410,9 +5176,26 @@ if nav_section == "仕入" and page == "伝票読み取り":
                 padding-right: 0.25rem !important;
                 max-width: 100% !important;
             }
-            iframe[title="streamlit.components.v1.html"] {
-                width: 100% !important;
-                max-width: 100% !important;
+            .st-key-invoice_camera [data-testid="stCameraInput"] {
+                min-height: calc(100dvh - 14rem) !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] video,
+            .st-key-invoice_camera [data-testid="stCameraInput"] img {
+                height: calc(100dvh - 14rem) !important;
+                min-height: calc(100dvh - 14rem) !important;
+                max-height: calc(100dvh - 14rem) !important;
+                aspect-ratio: unset !important;
+            }
+        }
+        @media (max-width: 1024px) and (orientation: landscape) {
+            .st-key-invoice_camera [data-testid="stCameraInput"] {
+                min-height: calc(100dvh - 6rem) !important;
+            }
+            .st-key-invoice_camera [data-testid="stCameraInput"] video,
+            .st-key-invoice_camera [data-testid="stCameraInput"] img {
+                height: calc(100dvh - 6rem) !important;
+                min-height: calc(100dvh - 6rem) !important;
+                max-height: calc(100dvh - 6rem) !important;
             }
         }
         </style>
@@ -5423,16 +5206,34 @@ if nav_section == "仕入" and page == "伝票読み取り":
     tab1, tab2 = st.tabs(["📷 カメラ", "📁 ファイル"])
     image = None
     with tab1:
-        st.caption("背面カメラで撮影します。内カメラのときは「🔄 カメラ切替」を押してください。")
-        camera_image = render_document_camera_capture()
-        if camera_image:
-            image = camera_image
-            st.success("撮影しました。下のエリアで AI 読み取りを実行します。")
+        st.caption(
+            "スマホ・タブレットでは **「カメラアプリで撮影」** を使うと背面カメラで全画面撮影でき、"
+            "横・縦どちらの向きでも読み取れます。"
+        )
+        mobile_capture = st.file_uploader(
+            "📷 カメラアプリで撮影（推奨）",
+            type=["png", "jpg", "jpeg"],
+            key="invoice_mobile_camera",
+            help="スマホではカメラアプリが開きます。撮影後に自動で AI 読み取りを開始します。",
+        )
+        st.divider()
+        st.caption("またはブラウザ内カメラで撮影")
+        camera_image = st.camera_input(
+            "撮影",
+            key="invoice_camera",
+            width="stretch",
+            label_visibility="collapsed",
+        )
+        if mobile_capture:
+            image = load_invoice_image(mobile_capture)
+            st.success("撮影画像を受け取りました。AI 読み取りを開始します。")
+        elif camera_image:
+            image = load_invoice_image(camera_image)
+            st.success("撮影しました。AI 読み取りを開始します。")
     with tab2:
         uploaded_file = st.file_uploader("画像", type=["png", "jpg", "jpeg", "bmp", "tiff"])
         if uploaded_file:
-            _clear_invoice_camera_capture()
-            image = Image.open(uploaded_file)
+            image = load_invoice_image(uploaded_file)
 
     if not image:
         st.info("カメラで撮影するか、画像をアップロードしてください。")
@@ -5448,8 +5249,7 @@ if nav_section == "仕入" and page == "伝票読み取り":
         st.error("`OPENAI_API_KEY` または `CHATGPT_API_KEY` を `.env` などに設定してください。")
         st.stop()
 
-    work_image = image if isinstance(image, Image.Image) else Image.open(image)
-    work_image = work_image.convert("RGB")
+    work_image = image if isinstance(image, Image.Image) else load_invoice_image(image)
 
     img_fp = _invoice_image_cache_key(work_image)
     api_fp = hashlib.md5(openai_api_key.encode("utf-8")).hexdigest()[:16]
