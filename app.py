@@ -17,6 +17,7 @@ from urllib import request, error
 from dotenv import load_dotenv
 from PIL import Image
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
@@ -4684,6 +4685,224 @@ def estimate_vertical_slip_count(img: Image.Image, max_slips: int = 6) -> int:
     return max(1, min(slips, max_slips))
 
 
+def render_document_camera_capture() -> Image.Image | None:
+    """背面カメラ優先・縦持ちで大きく表示する伝票撮影UI。"""
+    camera_html = """
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #000;
+      }
+      #wrap {
+        position: relative;
+        width: 100%;
+        height: 520px;
+        min-height: 420px;
+        background: #000;
+        overflow: hidden;
+      }
+      #video, #preview {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #000;
+      }
+      #preview { display: none; }
+      #toolbar {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        justify-content: center;
+        gap: 0.75rem;
+        padding: 1rem 0.75rem 1.1rem;
+        background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.55) 100%);
+        z-index: 5;
+      }
+      button {
+        border: 0;
+        border-radius: 999px;
+        font-size: 1.05rem;
+        font-weight: 700;
+        padding: 0.85rem 1.6rem;
+        box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45);
+        cursor: pointer;
+      }
+      #capture {
+        background: #ff4b4b;
+        color: #fff;
+        min-width: 7.5rem;
+      }
+      #switch, #retake {
+        background: rgba(255, 255, 255, 0.92);
+        color: #111;
+      }
+      #status {
+        position: absolute;
+        top: 0.75rem;
+        left: 0.75rem;
+        right: 0.75rem;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.45);
+        border-radius: 0.5rem;
+        padding: 0.45rem 0.65rem;
+        font-size: 0.85rem;
+        z-index: 6;
+        display: none;
+      }
+    </style>
+    <div id="wrap">
+      <div id="status"></div>
+      <video id="video" autoplay playsinline muted></video>
+      <img id="preview" alt="preview" />
+      <div id="toolbar">
+        <button id="switch" type="button">🔄 カメラ切替</button>
+        <button id="capture" type="button">撮影</button>
+        <button id="retake" type="button" style="display:none;">撮り直し</button>
+      </div>
+    </div>
+    <canvas id="canvas" style="display:none;"></canvas>
+    <script>
+      const video = document.getElementById("video");
+      const preview = document.getElementById("preview");
+      const canvas = document.getElementById("canvas");
+      const captureBtn = document.getElementById("capture");
+      const switchBtn = document.getElementById("switch");
+      const retakeBtn = document.getElementById("retake");
+      const statusEl = document.getElementById("status");
+      let stream = null;
+      let facingMode = "environment";
+
+      function setStatus(message) {
+        statusEl.textContent = message;
+        statusEl.style.display = message ? "block" : "none";
+      }
+
+      function getViewportSize() {
+        try {
+          const parent = window.parent;
+          if (parent && parent !== window) {
+            return {
+              width: parent.innerWidth || window.innerWidth,
+              height: parent.innerHeight || window.innerHeight,
+            };
+          }
+        } catch (err) {
+          /* 親画面のサイズが読めない環境では iframe 自身のサイズを使う */
+        }
+        return { width: window.innerWidth, height: window.innerHeight };
+      }
+
+      function applyLayout() {
+        const wrap = document.getElementById("wrap");
+        const { width, height } = getViewportSize();
+        const isLandscape = width > height;
+        const target = Math.round(
+          isLandscape ? height * 0.84 : height * 0.74
+        );
+        wrap.style.height = `${Math.max(target, 420)}px`;
+      }
+
+      function resizeFrame() {
+        applyLayout();
+        const wrap = document.getElementById("wrap");
+        const frameHeight = Math.ceil(wrap.getBoundingClientRect().height + 8);
+        window.parent.postMessage(
+          { type: "streamlit:setFrameHeight", height: frameHeight },
+          "*"
+        );
+      }
+
+      async function startCamera() {
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+        const constraints = {
+          audio: false,
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+        };
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: true });
+            setStatus("背面カメラを使えないため、利用可能なカメラを表示しています。");
+          } catch (fallbackErr) {
+            setStatus("カメラを起動できませんでした。ブラウザのカメラ許可を確認してください。");
+            return;
+          }
+        }
+        video.style.display = "block";
+        preview.style.display = "none";
+        captureBtn.style.display = "inline-block";
+        switchBtn.style.display = "inline-block";
+        retakeBtn.style.display = "none";
+        video.srcObject = stream;
+        setStatus(
+          facingMode === "environment"
+            ? "背面カメラで撮影できます。"
+            : "前面カメラで撮影しています。"
+        );
+        resizeFrame();
+      }
+
+      captureBtn.addEventListener("click", () => {
+        if (!video.videoWidth || !video.videoHeight) {
+          setStatus("カメラの準備中です。少し待ってから撮影してください。");
+          return;
+        }
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+        preview.src = dataUrl;
+        preview.style.display = "block";
+        video.style.display = "none";
+        captureBtn.style.display = "none";
+        switchBtn.style.display = "none";
+        retakeBtn.style.display = "inline-block";
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+          stream = null;
+        }
+        setStatus("");
+        Streamlit.setComponentValue(dataUrl);
+        resizeFrame();
+      });
+
+      switchBtn.addEventListener("click", () => {
+        facingMode = facingMode === "environment" ? "user" : "environment";
+        startCamera();
+      });
+
+      retakeBtn.addEventListener("click", () => {
+        Streamlit.setComponentValue(null);
+        startCamera();
+      });
+
+      window.addEventListener("resize", resizeFrame);
+      window.addEventListener("orientationchange", () => {
+        setTimeout(resizeFrame, 250);
+      });
+      startCamera().then(resizeFrame);
+    </script>
+    """
+    result = components.html(camera_html, height=640, scrolling=False)
+    if isinstance(result, str) and result.startswith("data:image"):
+        _header, encoded = result.split(",", 1)
+        return Image.open(io.BytesIO(base64.b64decode(encoded)))
+    return None
+
+
 def _read_invoice_image_segments(
     img: Image.Image,
     bounds: list[tuple[int, int]],
@@ -5131,93 +5350,16 @@ if nav_section == "仕入" and page == "伝票読み取り":
     st.markdown(
         """
         <style>
-        /* 伝票撮影: 横持ち・スマホ/タブレット向けにプレビューを最大化 */
-        .st-key-invoice_camera {
-            width: 100% !important;
-            max-width: 100% !important;
-            margin: 0 !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] {
-            position: relative !important;
-            width: 100% !important;
-            max-width: 100% !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: hidden !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] > div,
-        .st-key-invoice_camera [data-testid="stCameraInput"] video,
-        .st-key-invoice_camera [data-testid="stCameraInput"] img {
-            width: 100% !important;
-            max-width: 100% !important;
-            display: block !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] video,
-        .st-key-invoice_camera [data-testid="stCameraInput"] img {
-            aspect-ratio: 16 / 9 !important;
-            min-height: min(72vh, calc(100vw * 9 / 16)) !important;
-            max-height: 85vh !important;
-            height: auto !important;
-            object-fit: cover !important;
-            background: #000 !important;
-        }
-        .st-key-invoice_camera [data-testid="stCameraInput"] button {
-            position: absolute !important;
-            left: 50% !important;
-            bottom: 1.25rem !important;
-            transform: translateX(-50%) !important;
-            z-index: 30 !important;
-            margin: 0 !important;
-            font-size: 1.15rem !important;
-            font-weight: 700 !important;
-            padding: 0.9rem 2.2rem !important;
-            min-height: 3.25rem !important;
-            border-radius: 999px !important;
-            box-shadow: 0 6px 22px rgba(0, 0, 0, 0.45) !important;
-        }
         @media (max-width: 1024px) {
             section.main .block-container {
-                padding-top: 0.75rem !important;
-                padding-left: 0.35rem !important;
-                padding-right: 0.35rem !important;
+                padding-top: 0.5rem !important;
+                padding-left: 0.25rem !important;
+                padding-right: 0.25rem !important;
                 max-width: 100% !important;
             }
-            .st-key-invoice_camera {
-                width: calc(100% + 0.7rem) !important;
-                margin-left: -0.35rem !important;
-                margin-right: -0.35rem !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] {
-                min-height: calc(100dvh - 11rem) !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] video,
-            .st-key-invoice_camera [data-testid="stCameraInput"] img {
+            iframe[title="streamlit.components.v1.html"] {
                 width: 100% !important;
-                height: calc(100dvh - 11rem) !important;
-                min-height: calc(100dvh - 11rem) !important;
-                max-height: calc(100dvh - 11rem) !important;
-                aspect-ratio: unset !important;
-                object-fit: cover !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] button {
-                bottom: 1rem !important;
-                font-size: 1.25rem !important;
-                padding: 1rem 2.6rem !important;
-                min-height: 3.5rem !important;
-            }
-        }
-        @media (max-width: 1024px) and (orientation: landscape) {
-            .st-key-invoice_camera [data-testid="stCameraInput"] {
-                min-height: calc(100dvh - 5.5rem) !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] video,
-            .st-key-invoice_camera [data-testid="stCameraInput"] img {
-                height: calc(100dvh - 5.5rem) !important;
-                min-height: calc(100dvh - 5.5rem) !important;
-                max-height: calc(100dvh - 5.5rem) !important;
-            }
-            .st-key-invoice_camera [data-testid="stCameraInput"] button {
-                bottom: 0.75rem !important;
+                max-width: 100% !important;
             }
         }
         </style>
@@ -5228,12 +5370,8 @@ if nav_section == "仕入" and page == "伝票読み取り":
     tab1, tab2 = st.tabs(["📷 カメラ", "📁 ファイル"])
     image = None
     with tab1:
-        camera_image = st.camera_input(
-            "撮影",
-            key="invoice_camera",
-            width="stretch",
-            label_visibility="collapsed",
-        )
+        st.caption("背面カメラで撮影します。内カメラのときは「🔄 カメラ切替」を押してください。")
+        camera_image = render_document_camera_capture()
         if camera_image:
             image = camera_image
     with tab2:
