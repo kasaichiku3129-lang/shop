@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.envrc
 
 # Streamlit のローカルシークレット
 .streamlit/secrets.toml
@@ -22,6 +23,7 @@ dist/
 .venv*/
 venv/
 ENV/
+env/
 
 # IDE / OS
 .idea/
@@ -30,6 +32,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# ログ・キャッシュ
+# ログ・キャッシュ・テスト
 *.log
 .cache/
+.pytest_cache/
+.coverage
+htmlcov/
