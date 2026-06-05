@@ -5131,6 +5131,25 @@ if nav_section == "仕入" and page == "伝票読み取り":
     st.markdown(
         """
         <style>
+        .st-key-invoice_camera [data-testid="stCameraInput"],
+        .st-key-invoice_camera {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        .st-key-invoice_camera [data-testid="stCameraInput"] > div,
+        .st-key-invoice_camera [data-testid="stCameraInput"] video,
+        .st-key-invoice_camera [data-testid="stCameraInput"] img {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+        .st-key-invoice_camera [data-testid="stCameraInput"] video,
+        .st-key-invoice_camera [data-testid="stCameraInput"] img {
+            min-height: 56vh !important;
+            max-height: 78vh !important;
+            height: auto !important;
+            aspect-ratio: 3 / 4 !important;
+            object-fit: cover !important;
+        }
         .stCameraInput button {
             font-size: 20px !important;
             padding: 15px 30px !important;
@@ -5149,7 +5168,7 @@ if nav_section == "仕入" and page == "伝票読み取り":
     tab1, tab2 = st.tabs(["📷 カメラ", "📁 ファイル"])
     image = None
     with tab1:
-        camera_image = st.camera_input("撮影", key="invoice_camera")
+        camera_image = st.camera_input("撮影", key="invoice_camera", width="stretch")
         if camera_image:
             image = camera_image
     with tab2:
