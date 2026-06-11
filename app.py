@@ -17,6 +17,7 @@ from urllib import request, error
 from dotenv import load_dotenv
 from PIL import Image, ImageOps
 import streamlit as st
+import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 from invoice_camera_component import capture_invoice_camera_image
@@ -25,7 +26,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 SUPABASE_TABLE_PURCHASES = os.getenv("SUPABASE_PURCHASES_TABLE", "purchases")
 SUPABASE_PURCHASES_NOTE_COLUMN = (os.getenv("SUPABASE_PURCHASES_NOTE_COLUMN") or "Note").strip()
-SUPABASE_TABLE_PRODUCTS = (os.getenv("SUPABASE_TABLE_PRODUCTS") or "products").strip()
+SUPABASE_TABLE_PRODUCTS = (os.getenv("SUPABASE_TABLE_PRODUCTS") or "purchase_products").strip()
 SUPABASE_TABLE_SUPPLIERS = (os.getenv("SUPABASE_TABLE_SUPPLIERS") or "suppliers").strip()
 SUPABASE_SUPPLIERS_NAME_COLUMN = (os.getenv("SUPABASE_SUPPLIERS_NAME_COLUMN") or "name").strip()
 SUPABASE_PRODUCTS_NAME_COLUMN = (os.getenv("SUPABASE_PRODUCTS_NAME_COLUMN") or "product_name").strip()
@@ -34,7 +35,7 @@ SUPABASE_PRODUCTS_ROW_ID_COLUMN = (os.getenv("SUPABASE_PRODUCTS_ROW_ID_COLUMN") 
 SUPABASE_PRODUCTS_CODE_COLUMN = (
     os.getenv("SUPABASE_PRODUCTS_CODE_COLUMN")
     or os.getenv("SUPABASE_PRODUCTS_ID_COLUMN")
-    or "product_id"
+    or ""
 ).strip()
 SUPABASE_PURCHASES_PRODUCT_ID_COLUMN = (
     os.getenv("SUPABASE_PURCHASES_PRODUCT_ID_COLUMN") or "product_id"
@@ -43,19 +44,40 @@ SUPABASE_PURCHASES_PRODUCT_NAME_COLUMN = (
     os.getenv("SUPABASE_PURCHASES_PRODUCT_NAME_COLUMN") or "product_name"
 ).strip()
 SUPABASE_TABLE_SALES = (os.getenv("SUPABASE_TABLE_SALES") or "sales").strip()
+SUPABASE_TABLE_SALES_PRODUCTS = (
+    os.getenv("SUPABASE_TABLE_SALES_PRODUCTS") or "sales_products"
+).strip()
 SUPABASE_SALES_DATE_COLUMN = (os.getenv("SUPABASE_SALES_DATE_COLUMN") or "sales_date").strip()
 SUPABASE_SALES_PRODUCTS_COLUMN = (
     os.getenv("SUPABASE_SALES_PRODUCTS_COLUMN")
     or os.getenv("SUPABASE_SALES_PRODUCT_NAME_COLUMN")
     or "sales_products"
 ).strip()
+SUPABASE_SALES_PRODUCT_ID_COLUMN = (
+    os.getenv("SUPABASE_SALES_PRODUCT_ID_COLUMN")
+    or os.getenv("SUPABASE_SALES_CATEGORY_FK_COLUMN")
+    or "product_id"
+).strip()
+SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN = (
+    os.getenv("SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN") or "sales_category"
+).strip()
+SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN = (
+    os.getenv("SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN") or "sales_category2"
+).strip()
+SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN = (
+    os.getenv("SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN") or "sales_products"
+).strip()
+# 旧スキーマ互換: sales 行に text の部門列がある場合のみ .env で指定
 SUPABASE_SALES_KATEGORY_COLUMN = (
     os.getenv("SUPABASE_SALES_KATEGORY_COLUMN")
     or os.getenv("SUPABASE_SALES_DEPARTMENT_COLUMN")
-    or "sales_kategory"
+    or ""
 ).strip()
 SUPABASE_SALES_AMOUNT_COLUMN = (os.getenv("SUPABASE_SALES_AMOUNT_COLUMN") or "sales_amount").strip()
 SUPABASE_SALES_QUANTITY_COLUMN = (os.getenv("SUPABASE_SALES_QUANTITY_COLUMN") or "quantity").strip()
+SUPABASE_SALES_WEEKDAY_COLUMN = (
+    os.getenv("SUPABASE_SALES_WEEKDAY_COLUMN") or "weekday_name"
+).strip()
 SUPABASE_PURCHASES_KATEGORY_COLUMN = (
     os.getenv("SUPABASE_PURCHASES_KATEGORY_COLUMN") or "kategory"
 ).strip()
@@ -468,6 +490,7 @@ def normalize_sales_payload_for_supabase(payload: dict) -> dict:
     if qty_col in out and out[qty_col] is not None:
         v = float(out[qty_col])
         out[qty_col] = int(v) if v == int(v) else v
+    attach_weekday_name_to_sales_payload(out)
     return out
 
 
@@ -498,8 +521,10 @@ def _extract_product_row_id_from_row(r: dict) -> int | None:
 
 
 def _extract_product_code_from_row(r: dict) -> str | None:
-    """products.product_id（任意の商品コード・表示用）。"""
-    code_col = (SUPABASE_PRODUCTS_CODE_COLUMN or "product_id").strip()
+    """purchase_products の任意商品コード列（存在する場合のみ）。"""
+    code_col = (SUPABASE_PRODUCTS_CODE_COLUMN or "").strip()
+    if not code_col:
+        return None
     v = r.get(code_col)
     if v is not None and str(v).strip():
         return _normalize_product_code(v)
@@ -555,16 +580,20 @@ def _supplier_name_from_product_row(r: dict, suppliers_map: dict[str, str]) -> s
 
 def fetch_product_catalog(client: Client) -> tuple[list[dict], str | None]:
     """
-    products + suppliers から商品マスタを取得。
+    purchase_products + suppliers から仕入商品マスタを取得。
     戻り値: ([{"name", "supplier", "row_id", "product_code"}, ...], エラー時メッセージ)
     """
     name_col = (SUPABASE_PRODUCTS_NAME_COLUMN or "product_name").strip()
     sup_col = (SUPABASE_PRODUCTS_SUPPLIER_COLUMN or "supplier_id").strip()
-    tbl = (SUPABASE_TABLE_PRODUCTS or "products").strip()
+    tbl = (SUPABASE_TABLE_PRODUCTS or "purchase_products").strip()
     suppliers_map = fetch_suppliers_map(client)
     sup_tbl = (SUPABASE_TABLE_SUPPLIERS or "suppliers").strip()
     sup_name_col = (SUPABASE_SUPPLIERS_NAME_COLUMN or "name").strip()
-    select_cols = f"id, {name_col}, {SUPABASE_PRODUCTS_CODE_COLUMN}, {sup_col}, {sup_tbl}({sup_name_col})"
+    code_col = (SUPABASE_PRODUCTS_CODE_COLUMN or "").strip()
+    select_parts = ["id", name_col, sup_col, f"{sup_tbl}({sup_name_col})"]
+    if code_col:
+        select_parts.insert(2, code_col)
+    select_cols = ", ".join(select_parts)
     try:
         res = client.table(tbl).select(select_cols).limit(5000).execute()
     except Exception:
@@ -608,8 +637,13 @@ def catalog_lookup_by_row_id(catalog: list[dict]) -> dict[str, dict]:
 
 
 def _product_fields_from_nested_row(row: dict) -> tuple[str, str]:
-    """PostgREST の products(suppliers(...)) 埋め込みから商品名・取引先名を取得。"""
-    nested = row.get("products")
+    """PostgREST の purchase_products(suppliers(...)) 埋め込みから商品名・取引先名を取得。"""
+    nested = None
+    for key in (SUPABASE_TABLE_PRODUCTS, "purchase_products", "products"):
+        candidate = row.get(key)
+        if isinstance(candidate, dict):
+            nested = candidate
+            break
     if not isinstance(nested, dict):
         return "", ""
     name_col = (SUPABASE_PRODUCTS_NAME_COLUMN or "product_name").strip()
@@ -658,6 +692,358 @@ def enrich_purchase_rows(rows: list[dict], catalog: list[dict] | None = None) ->
     return enriched
 
 
+def fetch_sales_product_catalog(client: Client) -> tuple[list[dict], str | None]:
+    """sales_products マスタを取得。"""
+    tbl = (SUPABASE_TABLE_SALES_PRODUCTS or "sales_products").strip()
+    cat_col = (SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN or "sales_category").strip()
+    cat2_col = (SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN or "sales_category2").strip()
+    name_col = (SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN or "sales_products").strip()
+    try:
+        res = (
+            client.table(tbl)
+            .select(f"id, {cat_col}, {cat2_col}, {name_col}")
+            .limit(10000)
+            .execute()
+        )
+    except Exception:
+        try:
+            res = client.table(tbl).select("*").limit(10000).execute()
+        except Exception as e:
+            return [], str(e)
+    out: list[dict] = []
+    for r in getattr(res, "data", None) or []:
+        if not isinstance(r, dict):
+            continue
+        row_id = _coerce_int_id(r.get("id"))
+        if row_id is None:
+            continue
+        out.append(
+            {
+                "row_id": row_id,
+                "sales_category": str(r.get(cat_col) or r.get("sales_category") or "").strip(),
+                "sales_category2": str(r.get(cat2_col) or r.get("sales_category2") or "").strip(),
+                "product_name": str(
+                    r.get(name_col) or r.get("sales_products") or ""
+                ).strip(),
+            }
+        )
+    return out, None
+
+
+def sales_product_catalog_lookup(catalog: list[dict]) -> dict[str, dict]:
+    return {str(x["row_id"]): x for x in catalog if x.get("row_id") is not None}
+
+
+def _sales_select_with_master_embed() -> str:
+    """sales + sales_products マスタ（FK: product_id）。テーブル名 embed は列名と衝突するため使わない。"""
+    pid_col = (SUPABASE_SALES_PRODUCT_ID_COLUMN or "product_id").strip()
+    cat_col = (SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN or "sales_category").strip()
+    cat2_col = (SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN or "sales_category2").strip()
+    name_col = (SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN or "sales_products").strip()
+    return f"*, {pid_col}({cat_col}, {cat2_col}, {name_col})"
+
+
+def _sales_nested_master_dict(row: dict) -> dict | None:
+    """PostgREST の product_id(...) 埋め込み、または sales_products テーブル埋め込みからマスタ情報を取得。"""
+    cat_col = (SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN or "sales_category").strip()
+    cat2_col = (SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN or "sales_category2").strip()
+    name_col = (SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN or "sales_products").strip()
+    pid_col = (SUPABASE_SALES_PRODUCT_ID_COLUMN or "product_id").strip()
+
+    candidates: list[dict | None] = []
+    nested_pid = row.get(pid_col)
+    if isinstance(nested_pid, dict):
+        candidates.append(nested_pid)
+    for key in (SUPABASE_TABLE_SALES_PRODUCTS, "sales_products"):
+        nested = row.get(key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+
+    for nested in candidates:
+        if not nested:
+            continue
+        out = {
+            "sales_category": str(nested.get(cat_col) or nested.get("sales_category") or "").strip(),
+            "sales_category2": str(nested.get(cat2_col) or nested.get("sales_category2") or "").strip(),
+            "product_name": str(nested.get(name_col) or nested.get("sales_products") or "").strip(),
+        }
+        if any(out.values()):
+            return out
+    return None
+
+
+def _sales_department_label_from_master(prod: dict | None) -> str:
+    if not prod:
+        return ""
+    c1 = str(prod.get("sales_category") or "").strip()
+    c2 = str(prod.get("sales_category2") or "").strip()
+    if c1 and c2 and c1 != c2:
+        return f"{c1} / {c2}"
+    return c1 or c2
+
+
+def _sales_master_from_row(row: dict, lookup: dict[str, dict]) -> dict | None:
+    nested = _sales_nested_master_dict(row)
+    if nested:
+        return nested
+    pid_col = (SUPABASE_SALES_PRODUCT_ID_COLUMN or "product_id").strip()
+    master_id = _coerce_int_id(row.get(pid_col))
+    if master_id is None:
+        legacy_fk = (os.getenv("SUPABASE_SALES_CATEGORY_FK_COLUMN") or "").strip()
+        if legacy_fk and legacy_fk != pid_col:
+            master_id = _coerce_int_id(row.get(legacy_fk))
+    if master_id is None:
+        return None
+    return lookup.get(str(master_id))
+
+
+def _sales_product_name_from_row(row: dict, lookup: dict[str, dict]) -> str:
+    products_col = (SUPABASE_SALES_PRODUCTS_COLUMN or "sales_products").strip()
+    pid_col = (SUPABASE_SALES_PRODUCT_ID_COLUMN or "product_id").strip()
+    for key in (products_col, "sales_products", "product_name"):
+        val = row.get(key)
+        if key == pid_col and isinstance(val, dict):
+            continue
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    master = _sales_master_from_row(row, lookup)
+    if master and master.get("product_name"):
+        return str(master["product_name"]).strip()
+    return ""
+
+
+def _sales_department_from_row(row: dict, lookup: dict[str, dict]) -> str:
+    legacy_col = (SUPABASE_SALES_KATEGORY_COLUMN or "").strip()
+    if legacy_col and row.get(legacy_col) is not None and str(row.get(legacy_col)).strip():
+        return str(row.get(legacy_col)).strip()
+    master = _sales_master_from_row(row, lookup)
+    label = _sales_department_label_from_master(master)
+    return label or ""
+
+
+def enrich_sales_rows(
+    rows: list[dict], catalog: list[dict] | None = None
+) -> list[dict]:
+    """sales 行に product_name / kategory を付与（sales_products マスタ参照）。"""
+    lookup = sales_product_catalog_lookup(catalog or [])
+    enriched: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        row = dict(r)
+        row["product_name"] = _sales_product_name_from_row(row, lookup) or "（未設定）"
+        master = _sales_master_from_row(row, lookup)
+        row["kategory"] = _sales_department_from_row(row, lookup) or "（未設定）"
+        row["sales_category"] = str(master.get("sales_category") or "").strip() if master else ""
+        row["sales_category2"] = str(master.get("sales_category2") or "").strip() if master else ""
+        enriched.append(row)
+    return enriched
+
+
+def distinct_sales_category2_choices(catalog: list[dict]) -> list[str]:
+    """売上履歴のカテゴリ2選択肢（sales_products.sales_category2 の一意値）。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in catalog:
+        v = str(x.get("sales_category2") or "").strip()
+        if v and v not in seen:
+            seen.add(v)
+            out.append(v)
+    return sorted(out)
+
+
+def _sales_master_ids_matching_department(catalog: list[dict], department: str) -> list[int]:
+    needle = (department or "").strip().lower()
+    if not needle:
+        return []
+    ids: list[int] = []
+    for x in catalog:
+        labels = [
+            str(x.get("sales_category") or ""),
+            _sales_department_label_from_master(x),
+        ]
+        blob = " ".join(labels).lower()
+        if needle in blob:
+            rid = _coerce_int_id(x.get("row_id"))
+            if rid is not None:
+                ids.append(rid)
+    return list(dict.fromkeys(ids))
+
+
+def _sales_master_ids_matching_category2(catalog: list[dict], category2: str) -> list[int]:
+    needle = (category2 or "").strip().lower()
+    if not needle:
+        return []
+    ids: list[int] = []
+    for x in catalog:
+        c2 = str(x.get("sales_category2") or "").lower()
+        if needle in c2:
+            rid = _coerce_int_id(x.get("row_id"))
+            if rid is not None:
+                ids.append(rid)
+    return list(dict.fromkeys(ids))
+
+
+def _sales_master_ids_matching_product_name(catalog: list[dict], product_name: str) -> list[int]:
+    needle = (product_name or "").strip().lower()
+    if not needle:
+        return []
+    ids: list[int] = []
+    for x in catalog:
+        pname = str(x.get("product_name") or "").lower()
+        if needle in pname:
+            rid = _coerce_int_id(x.get("row_id"))
+            if rid is not None:
+                ids.append(rid)
+    return list(dict.fromkeys(ids))
+
+
+def fetch_sales_master_ids_from_db(
+    client: Client,
+    *,
+    product_name: str = "",
+    department: str = "",
+    category2: str = "",
+) -> list[int]:
+    """sales_products を DB 上で部分一致検索し id 一覧を返す。"""
+    pn = (product_name or "").strip()
+    kat = (department or "").strip()
+    cat2 = (category2 or "").strip()
+    if not pn and not kat and not cat2:
+        return []
+    tbl = (SUPABASE_TABLE_SALES_PRODUCTS or "sales_products").strip()
+    cat_col = (SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN or "sales_category").strip()
+    cat2_col = (SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN or "sales_category2").strip()
+    name_col = (SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN or "sales_products").strip()
+    try:
+        q = client.table(tbl).select("id")
+        if pn:
+            q = q.ilike(name_col, f"%{pn}%")
+        if kat:
+            q = q.ilike(cat_col, f"%{kat}%")
+        if cat2:
+            q = q.ilike(cat2_col, f"%{cat2}%")
+        res = q.limit(5000).execute()
+    except Exception:
+        return []
+    ids: list[int] = []
+    for row in getattr(res, "data", None) or []:
+        if not isinstance(row, dict):
+            continue
+        rid = _coerce_int_id(row.get("id"))
+        if rid is not None:
+            ids.append(rid)
+    return list(dict.fromkeys(ids))
+
+
+def _sales_row_matches_product_filter(row: dict, product_name: str) -> bool:
+    needle = (product_name or "").strip().lower()
+    if not needle:
+        return True
+    products_col = (SUPABASE_SALES_PRODUCTS_COLUMN or "sales_products").strip()
+    parts = [
+        str(row.get("product_name") or ""),
+        str(row.get(products_col) or ""),
+    ]
+    master = _sales_nested_master_dict(row) or {}
+    parts.append(str(master.get("product_name") or ""))
+    return any(needle in p.lower() for p in parts if p)
+
+
+def _sales_row_matches_department_filter(row: dict, department: str) -> bool:
+    needle = (department or "").strip().lower()
+    if not needle:
+        return True
+    parts = [
+        str(row.get("sales_category") or ""),
+        str(row.get("kategory") or ""),
+    ]
+    master = _sales_nested_master_dict(row)
+    if master:
+        parts.append(str(master.get("sales_category") or ""))
+        parts.append(_sales_department_label_from_master(master))
+    return any(needle in p.lower() for p in parts if p)
+
+
+def _sales_row_matches_category2_filter(row: dict, category2: str) -> bool:
+    needle = (category2 or "").strip().lower()
+    if not needle:
+        return True
+    parts = [str(row.get("sales_category2") or "")]
+    master = _sales_nested_master_dict(row)
+    if master:
+        parts.append(str(master.get("sales_category2") or ""))
+    return any(needle in p.lower() for p in parts if p)
+
+
+def resolve_or_create_sales_product_master(
+    client: Client,
+    department: str,
+    product_name: str,
+    *,
+    cache: dict[tuple[str, str], int | None] | None = None,
+) -> int | None:
+    """sales_products を検索し、無ければ作成して id を返す。"""
+    dept = str(department or "").strip()
+    pname = str(product_name or "").strip()
+    if not dept or not pname:
+        return None
+    key = (dept, pname)
+    if cache is not None and key in cache:
+        return cache[key]
+
+    tbl = (SUPABASE_TABLE_SALES_PRODUCTS or "sales_products").strip()
+    cat_col = (SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN or "sales_category").strip()
+    name_col = (SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN or "sales_products").strip()
+    master_id: int | None = None
+    try:
+        res = (
+            client.table(tbl)
+            .select("id")
+            .eq(cat_col, dept)
+            .eq(name_col, pname)
+            .limit(1)
+            .execute()
+        )
+        for row in getattr(res, "data", None) or []:
+            master_id = _coerce_int_id(row.get("id") if isinstance(row, dict) else None)
+            if master_id is not None:
+                break
+        if master_id is None:
+            ins = client.table(tbl).insert({cat_col: dept, name_col: pname}).execute()
+            data = getattr(ins, "data", None) or []
+            if data and isinstance(data[0], dict):
+                master_id = _coerce_int_id(data[0].get("id"))
+    except Exception:
+        master_id = None
+
+    if cache is not None:
+        cache[key] = master_id
+    return master_id
+
+
+def prepare_sales_payloads_for_insert(
+    client: Client, payloads: list[dict]
+) -> list[dict]:
+    """CSV 等の売上 payload を sales_products 参照付き insert 用に変換。"""
+    cache: dict[tuple[str, str], int | None] = {}
+    out: list[dict] = []
+    pid_col = (SUPABASE_SALES_PRODUCT_ID_COLUMN or "product_id").strip()
+    products_col = (SUPABASE_SALES_PRODUCTS_COLUMN or "sales_products").strip()
+    for payload in payloads:
+        row = dict(payload)
+        dept = str(row.pop("_department", "") or "").strip()
+        row.pop("_preview_department", None)
+        pname = str(row.get(products_col) or "").strip()
+        master_id = resolve_or_create_sales_product_master(
+            client, dept, pname, cache=cache
+        )
+        if master_id is not None:
+            row[pid_col] = master_id
+        out.append(normalize_sales_payload_for_supabase(row))
+    return out
+
+
 def fetch_product_row_ids_for_supplier_filter(
     client: Client,
     supplier: str,
@@ -673,7 +1059,7 @@ def fetch_product_row_ids_for_supplier_filter(
         return None
 
     sup_col = (SUPABASE_PRODUCTS_SUPPLIER_COLUMN or "supplier_id").strip()
-    tbl = (SUPABASE_TABLE_PRODUCTS or "products").strip()
+    tbl = (SUPABASE_TABLE_PRODUCTS or "purchase_products").strip()
     sup_tbl = (SUPABASE_TABLE_SUPPLIERS or "suppliers").strip()
     sup_name_col = (SUPABASE_SUPPLIERS_NAME_COLUMN or "name").strip()
     sup_l = sup.lower()
@@ -999,7 +1385,8 @@ def fetch_purchases_filtered(
     name_col = (SUPABASE_PRODUCTS_NAME_COLUMN or "product_name").strip()
     sup_tbl = (SUPABASE_TABLE_SUPPLIERS or "suppliers").strip()
     sup_name_col = (SUPABASE_SUPPLIERS_NAME_COLUMN or "name").strip()
-    select_expr = f"*, products({name_col}, {sup_tbl}({sup_name_col}))"
+    prod_tbl = (SUPABASE_TABLE_PRODUCTS or "purchase_products").strip()
+    select_expr = f"*, {prod_tbl}({name_col}, {sup_tbl}({sup_name_col}))"
 
     def _build_query(select_cols: str):
         q = client.table(SUPABASE_TABLE_PURCHASES).select(select_cols)
@@ -2120,6 +2507,64 @@ def _csv_date_to_iso(value) -> str:
     return normalize_purchase_date_to_iso(str(value).strip())
 
 
+_WEEKDAY_NAMES_JA = ("月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日")
+
+
+def weekday_name_from_iso_date(date_iso: str) -> str:
+    """YYYY-MM-DD から日本語の曜日名（例: 月曜日）を返す。"""
+    d = normalize_purchase_date_to_iso(str(date_iso or "").strip())
+    if len(d) < 10:
+        return ""
+    try:
+        dt = datetime.strptime(d[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    return _WEEKDAY_NAMES_JA[dt.weekday()]
+
+
+def _normalize_weekday_label(label: str) -> str:
+    """DB の weekday_name や略称を「月曜日」形式に揃える。"""
+    s = str(label or "").strip()
+    if not s:
+        return ""
+    if s in _WEEKDAY_NAMES_JA:
+        return s
+    for wd in _WEEKDAY_NAMES_JA:
+        short = wd.replace("曜日", "曜")
+        if s == wd or s == short or s + "曜日" == wd or wd.startswith(s):
+            return wd
+    return s
+
+
+def weekday_label_for_record(row: dict, *, date_iso: str = "") -> str:
+    """sales 生行または analytics 行から曜日ラベルを返す（DB 優先、なければ日付から算出）。"""
+    wd_col = (SUPABASE_SALES_WEEKDAY_COLUMN or "weekday_name").strip()
+    for key in ("weekday_name", wd_col):
+        if not key:
+            continue
+        raw = str(row.get(key) or "").strip()
+        if raw:
+            normalized = _normalize_weekday_label(raw)
+            if normalized:
+                return normalized
+    d = date_iso or str(row.get("date") or row.get(SUPABASE_SALES_DATE_COLUMN) or "").strip()
+    return weekday_name_from_iso_date(d)
+
+
+def attach_weekday_name_to_sales_payload(payload: dict) -> dict:
+    """sales_date から weekday_name を付与（未設定のときのみ）。"""
+    wd_col = (SUPABASE_SALES_WEEKDAY_COLUMN or "weekday_name").strip()
+    date_col = (SUPABASE_SALES_DATE_COLUMN or "sales_date").strip()
+    if not wd_col:
+        return payload
+    if str(payload.get(wd_col) or "").strip():
+        return payload
+    wd = weekday_name_from_iso_date(str(payload.get(date_col) or ""))
+    if wd:
+        payload[wd_col] = wd
+    return payload
+
+
 def resolve_sales_csv_columns(df: pd.DataFrame) -> dict[str, str | None]:
     """CSV から取引営業日・商品名・部門・売上・数量の列名を解決。"""
     cols = list(df.columns)
@@ -2156,9 +2601,9 @@ def sales_dataframe_to_payloads(df: pd.DataFrame) -> tuple[list[dict], list[str]
     col = resolve_sales_csv_columns(df)
     date_col = SUPABASE_SALES_DATE_COLUMN
     products_col = SUPABASE_SALES_PRODUCTS_COLUMN
-    kategory_col = SUPABASE_SALES_KATEGORY_COLUMN
     amt_col = SUPABASE_SALES_AMOUNT_COLUMN
     qty_col = SUPABASE_SALES_QUANTITY_COLUMN
+    wd_col = SUPABASE_SALES_WEEKDAY_COLUMN
 
     warnings: list[str] = []
     payloads: list[dict] = []
@@ -2197,14 +2642,17 @@ def sales_dataframe_to_payloads(df: pd.DataFrame) -> tuple[list[dict], list[str]
         row_payload: dict = {
             date_col: date_iso,
             products_col: str(product_name).strip(),
-            kategory_col: kategory_val,
+            "_department": kategory_val,
             amt_col: int(sales_amount),
         }
+        wd = weekday_name_from_iso_date(date_iso)
+        if wd_col and wd:
+            row_payload[wd_col] = wd
         if col.get("quantity"):
             sales_qty = _coerce_sales_quantity(row.get(col["quantity"]))
             if sales_qty is not None:
                 row_payload[qty_col] = sales_qty
-        payloads.append(normalize_sales_payload_for_supabase(row_payload))
+        payloads.append(row_payload)
 
     if not payloads:
         raise ValueError("取り込める有効な行がありませんでした。")
@@ -2215,14 +2663,15 @@ def sales_payloads_to_preview_df(payloads: list[dict]) -> pd.DataFrame:
     """保存前プレビュー用（日本語列名）。"""
     date_col = SUPABASE_SALES_DATE_COLUMN
     products_col = SUPABASE_SALES_PRODUCTS_COLUMN
-    kategory_col = SUPABASE_SALES_KATEGORY_COLUMN
     amt_col = SUPABASE_SALES_AMOUNT_COLUMN
     qty_col = SUPABASE_SALES_QUANTITY_COLUMN
+    wd_col = SUPABASE_SALES_WEEKDAY_COLUMN
     rows = [
         {
             "取引営業日": p.get(date_col),
+            "曜日": p.get(wd_col) or weekday_name_from_iso_date(str(p.get(date_col) or "")),
             "商品名": p.get(products_col),
-            "部門": p.get(kategory_col),
+            "部門": p.get("_department") or p.get("_preview_department"),
             "商品数": p.get(qty_col),
             "売上": p.get(amt_col),
         }
@@ -2232,42 +2681,62 @@ def sales_payloads_to_preview_df(payloads: list[dict]) -> pd.DataFrame:
 
 
 def render_supabase_sales_schema_help() -> None:
-    """sales テーブルに必要な列が無いときの案内（database.md 準拠）。"""
-    tbl = SUPABASE_TABLE_SALES
+    """sales / sales_products テーブルに必要な列が無いときの案内（database.md 準拠）。"""
+    sales_tbl = SUPABASE_TABLE_SALES
+    master_tbl = SUPABASE_TABLE_SALES_PRODUCTS
     st.markdown(
-        f"`public.{tbl}` は `database.md` の定義どおり次の列が必要です（Supabase → SQL Editor）。"
+        f"`public.{master_tbl}` と `public.{sales_tbl}` は `database.md` の定義どおり次の列が必要です"
+        "（Supabase → SQL Editor）。"
     )
     st.code(
-        f"""create table if not exists public.{tbl} (
+        f"""create table if not exists public.{master_tbl} (
+  id bigint generated by default as identity primary key,
+  created_at timestamptz default now(),
+  sales_category text,
+  sales_category2 text,
+  sales_products text
+);
+
+create table if not exists public.{sales_tbl} (
   id bigint generated by default as identity primary key,
   created_at timestamptz default now(),
   sales_date date,
   sales_products text,
-  sales_kategory text,
-  quantity numeric,
-  sales_amount bigint
+  sales_amount bigint,
+  quantity bigint,
+  product_id bigint references public.{master_tbl}(id),
+  weekday_name text
 );
 
-alter table public.{tbl} enable row level security;
-drop policy if exists "sales_insert_authenticated" on public.{tbl};
+alter table public.{sales_tbl} enable row level security;
+drop policy if exists "sales_insert_authenticated" on public.{sales_tbl};
 create policy "sales_insert_authenticated"
-  on public.{tbl} for insert to authenticated with check (true);
-drop policy if exists "sales_select_authenticated" on public.{tbl};
+  on public.{sales_tbl} for insert to authenticated with check (true);
+drop policy if exists "sales_select_authenticated" on public.{sales_tbl};
 create policy "sales_select_authenticated"
-  on public.{tbl} for select to authenticated using (true);
+  on public.{sales_tbl} for select to authenticated using (true);
+
+alter table public.{master_tbl} enable row level security;
+drop policy if exists "sales_products_insert_authenticated" on public.{master_tbl};
+create policy "sales_products_insert_authenticated"
+  on public.{master_tbl} for insert to authenticated with check (true);
+drop policy if exists "sales_products_select_authenticated" on public.{master_tbl};
+create policy "sales_products_select_authenticated"
+  on public.{master_tbl} for select to authenticated using (true);
 """,
         language="sql",
     )
 
 
 def insert_sales_to_supabase(client: Client, payloads: list[dict], *, batch_size: int = 500) -> int:
-    """sales へ一括 insert。戻り値は保存した行数。"""
+    """sales へ一括 insert。sales_products 参照を解決してから保存。"""
     if not payloads:
         return 0
+    prepared = prepare_sales_payloads_for_insert(client, payloads)
     saved = 0
     tbl = SUPABASE_TABLE_SALES
-    for i in range(0, len(payloads), batch_size):
-        chunk = [normalize_sales_payload_for_supabase(p) for p in payloads[i : i + batch_size]]
+    for i in range(0, len(prepared), batch_size):
+        chunk = prepared[i : i + batch_size]
         client.table(tbl).insert(chunk).execute()
         saved += len(chunk)
     return saved
@@ -2275,13 +2744,15 @@ def insert_sales_to_supabase(client: Client, payloads: list[dict], *, batch_size
 
 def fetch_sales_for_dashboard(client: Client, *, months_back: int = 36) -> list[dict]:
     start, end = _dashboard_date_range(months_back=months_back)
-    return fetch_table_rows_paginated(
+    rows = fetch_table_rows_paginated(
         client,
         SUPABASE_TABLE_SALES,
         date_col=SUPABASE_SALES_DATE_COLUMN,
         start=start,
         end=end,
     )
+    catalog, _ = fetch_sales_product_catalog(client)
+    return enrich_sales_rows(rows, catalog)
 
 
 def count_sales_for_dashboard(client: Client, *, months_back: int = 36) -> int | None:
@@ -2300,34 +2771,84 @@ def fetch_sales_filtered(
     year_month: str,
     product_name: str,
     kategory: str,
+    category2: str = "",
     *,
     limit: int = 500,
 ) -> list[dict]:
-    """Supabase sales を年月・商品名・部門で取得。"""
+    """Supabase sales を年月・商品名・部門・カテゴリ2で取得。"""
     date_col = SUPABASE_SALES_DATE_COLUMN
     products_col = SUPABASE_SALES_PRODUCTS_COLUMN
-    kategory_col = SUPABASE_SALES_KATEGORY_COLUMN
+    pid_col = (SUPABASE_SALES_PRODUCT_ID_COLUMN or "product_id").strip()
     pn = (product_name or "").strip()
     kat = (kategory or "").strip()
+    cat2 = (category2 or "").strip()
+    catalog, _ = fetch_sales_product_catalog(client)
 
-    q = client.table(SUPABASE_TABLE_SALES).select("*")
+    master_ids = fetch_sales_master_ids_from_db(
+        client, product_name=pn, department=kat, category2=cat2
+    )
+    if not master_ids and catalog:
+        id_sets: list[set[int]] = []
+        if pn:
+            id_sets.append(set(_sales_master_ids_matching_product_name(catalog, pn)))
+        if kat:
+            id_sets.append(set(_sales_master_ids_matching_department(catalog, kat)))
+        if cat2:
+            id_sets.append(set(_sales_master_ids_matching_category2(catalog, cat2)))
+        if id_sets:
+            ids_set = id_sets[0]
+            for s in id_sets[1:]:
+                ids_set &= s
+            master_ids = list(ids_set)
+
+    select_expr = _sales_select_with_master_embed()
+    q = client.table(SUPABASE_TABLE_SALES).select(select_expr)
     rng = parse_year_month_filter(year_month)
     if rng:
         start, end = rng
         q = q.gte(date_col, start).lte(date_col, end)
-    if pn:
+
+    if (kat or cat2) and master_ids:
+        q = q.in_(pid_col, master_ids)
+    elif pn and master_ids:
+        id_list = ",".join(str(i) for i in master_ids)
+        q = q.or_(f"{products_col}.ilike.%{pn}%,{pid_col}.in.({id_list})")
+    elif pn:
         q = q.ilike(products_col, f"%{pn}%")
+    elif (kat or cat2) and not master_ids:
+        # マスタ未一致。日付範囲のみ取得し後段で絞る（該当なしの可能性大）
+        pass
+
+    if pn or kat or cat2:
+        fetch_limit = min(max(limit * 10, 1000), 5000)
+    else:
+        fetch_limit = limit
+
+    try:
+        res = q.order(date_col, desc=True).limit(fetch_limit).execute()
+        data = getattr(res, "data", None)
+    except Exception:
+        res = (
+            client.table(SUPABASE_TABLE_SALES)
+            .select("*")
+            .order(date_col, desc=True)
+            .limit(fetch_limit)
+            .execute()
+        )
+        data = getattr(res, "data", None)
+
+    rows = enrich_sales_rows(data if isinstance(data, list) else [], catalog)
+    if pn:
+        rows = [r for r in rows if _sales_row_matches_product_filter(r, pn)]
     if kat:
-        q = q.ilike(kategory_col, f"%{kat}%")
-    res = q.order(date_col, desc=True).limit(limit).execute()
-    data = getattr(res, "data", None)
-    return data if isinstance(data, list) else []
+        rows = [r for r in rows if _sales_row_matches_department_filter(r, kat)]
+    if cat2:
+        rows = [r for r in rows if _sales_row_matches_category2_filter(r, cat2)]
+    return rows[:limit]
 
 
 def sales_rows_to_analytics(rows: list[dict]) -> list[dict]:
     date_col = SUPABASE_SALES_DATE_COLUMN
-    products_col = SUPABASE_SALES_PRODUCTS_COLUMN
-    kategory_col = SUPABASE_SALES_KATEGORY_COLUMN
     amt_col = SUPABASE_SALES_AMOUNT_COLUMN
     qty_col = SUPABASE_SALES_QUANTITY_COLUMN
     out: list[dict] = []
@@ -2343,13 +2864,24 @@ def sales_rows_to_analytics(rows: list[dict]) -> list[dict]:
             {
                 "date": d,
                 "year_month": d[:7],
+                "weekday_name": weekday_label_for_record(r, date_iso=d) or "（未設定）",
                 "amount": amount,
                 "quantity": quantity,
-                "kategory": (str(r.get(kategory_col) or "").strip() or "（未設定）"),
-                "product_name": (str(r.get(products_col) or "").strip() or "（未設定）"),
+                "kategory": (str(r.get("kategory") or "").strip() or "（未設定）"),
+                "sales_category": (
+                    str(r.get("sales_category") or "").strip() or "（未設定）"
+                ),
+                "sales_category2": str(r.get("sales_category2") or "").strip(),
+                "product_name": (str(r.get("product_name") or "").strip() or "（未設定）"),
             }
         )
     return out
+
+
+def _sales_category1_label(record: dict) -> str:
+    """部門1（sales_products.sales_category）のみ。"""
+    cat = str(record.get("sales_category") or "").strip()
+    return cat or "（未設定）"
 
 
 def render_sales_csv_import_page() -> None:
@@ -2406,9 +2938,10 @@ def render_sales_csv_import_page() -> None:
         return
 
     st.caption(
-        f"Supabase 列: `{SUPABASE_SALES_DATE_COLUMN}`, `{SUPABASE_SALES_PRODUCTS_COLUMN}`, "
-        f"`{SUPABASE_SALES_KATEGORY_COLUMN}`, `{SUPABASE_SALES_QUANTITY_COLUMN}`, "
-        f"`{SUPABASE_SALES_AMOUNT_COLUMN}`"
+        f"Supabase 列: `{SUPABASE_SALES_DATE_COLUMN}`, `{SUPABASE_SALES_WEEKDAY_COLUMN}`（取引日から自動）, "
+        f"`{SUPABASE_SALES_PRODUCTS_COLUMN}`, "
+        f"`{SUPABASE_TABLE_SALES_PRODUCTS}`（`{SUPABASE_SALES_PRODUCT_ID_COLUMN}` → マスタ id）, "
+        f"`{SUPABASE_SALES_QUANTITY_COLUMN}`, `{SUPABASE_SALES_AMOUNT_COLUMN}`"
     )
 
     for w in warnings[:20]:
@@ -2508,45 +3041,1150 @@ def _build_sales_monthly_trend_df(
     return pd.DataFrame(rows), "月別推移（直近12ヶ月）"
 
 
-def _render_sales_dept_pie_chart(dept_df: pd.DataFrame) -> None:
-    """部門別売上の円グラフ。"""
+def _shift_date_back_years(d: date, years: int = 1) -> date:
+    try:
+        return d.replace(year=d.year - years)
+    except ValueError:
+        return d.replace(year=d.year - years, day=28)
+
+
+def sales_dashboard_yoy_comparison(
+    records: list[dict],
+    period_mode: str,
+    *,
+    month_pick: date | None = None,
+    year_pick: int | None = None,
+    range_start: date | None = None,
+    range_end: date | None = None,
+) -> tuple[list[dict], list[dict], str, str]:
+    """売上ダッシュボード用の前年同月・前年同期比較レコードを返す。"""
+    if period_mode == "月別":
+        if not month_pick:
+            month_pick = datetime.now().date().replace(day=1)
+        sel_ym = month_pick.strftime("%Y-%m")
+        yoy_ym = f"{month_pick.year - 1:04d}-{month_pick.month:02d}"
+        period = [r for r in records if r["year_month"] == sel_ym]
+        comparison = [r for r in records if r["year_month"] == yoy_ym]
+        period_label = f"{month_pick.year}年{month_pick.month}月"
+        comparison_label = f"{month_pick.year - 1}年{month_pick.month}月"
+        return period, comparison, period_label, comparison_label
+
+    if period_mode == "年別":
+        y = year_pick or datetime.now().year
+        y_str = f"{y:04d}"
+        prev_str = f"{y - 1:04d}"
+        period = [r for r in records if r["date"].startswith(y_str)]
+        comparison = [r for r in records if r["date"].startswith(prev_str)]
+        return period, comparison, f"{y}年", f"{y - 1}年"
+
+    if not range_start or not range_end:
+        today = datetime.now().date()
+        range_start = today.replace(day=1)
+        range_end = today
+    start_iso, end_iso = _date_to_iso(range_start), _date_to_iso(range_end)
+    period = [r for r in records if start_iso <= r["date"] <= end_iso]
+    comp_start = _shift_date_back_years(range_start, 1)
+    comp_end = _shift_date_back_years(range_end, 1)
+    comp_start_iso, comp_end_iso = _date_to_iso(comp_start), _date_to_iso(comp_end)
+    comparison = [r for r in records if comp_start_iso <= r["date"] <= comp_end_iso]
+    if range_start == range_end:
+        period_label = start_iso
+    else:
+        period_label = f"{start_iso} 〜 {end_iso}"
+    comparison_label = f"前年同期（{comp_start_iso} 〜 {comp_end_iso}）"
+    return period, comparison, period_label, comparison_label
+
+
+def _aggregate_sales_amount_by_weekday(rows: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = defaultdict(float)
+    for r in rows:
+        wd = str(r.get("weekday_name") or "").strip()
+        if not wd or wd == "（未設定）":
+            wd = weekday_name_from_iso_date(str(r.get("date") or ""))
+        if wd:
+            out[wd] += r["amount"]
+    return dict(out)
+
+
+def _build_sales_yoy_amount_trend_df(
+    period_rows: list[dict],
+    yoy_rows: list[dict],
+    period_label: str,
+    yoy_label: str,
+    *,
+    period_mode: str,
+    year_pick: int | None = None,
+) -> tuple[pd.DataFrame, str]:
+    """前年同月・同期の売上金額比較（日別 or 月別）。"""
+    if period_mode == "年別" and year_pick:
+        rows = []
+        for m in range(1, 13):
+            ym_cur = f"{year_pick:04d}-{m:02d}"
+            ym_prev = f"{year_pick - 1:04d}-{m:02d}"
+            rows.append(
+                {
+                    "月": f"{m}月",
+                    period_label: sum(r["amount"] for r in period_rows if r["year_month"] == ym_cur),
+                    yoy_label: sum(r["amount"] for r in yoy_rows if r["year_month"] == ym_prev),
+                }
+            )
+        return pd.DataFrame(rows), f"月別売上（{period_label} vs {yoy_label}・各月前年同月比）"
+
+    if period_mode == "月別":
+        by_day_cur: dict[int, float] = defaultdict(float)
+        by_day_yoy: dict[int, float] = defaultdict(float)
+        for r in period_rows:
+            by_day_cur[int(r["date"][8:10])] += r["amount"]
+        for r in yoy_rows:
+            by_day_yoy[int(r["date"][8:10])] += r["amount"]
+        days = sorted(set(by_day_cur) | set(by_day_yoy))
+        rows = [
+            {
+                "日": d,
+                period_label: by_day_cur.get(d, 0.0),
+                yoy_label: by_day_yoy.get(d, 0.0),
+            }
+            for d in days
+        ]
+        return (
+            pd.DataFrame(rows),
+            f"日別売上（{period_label} vs {yoy_label}）",
+        )
+
+    cur_dates = sorted({r["date"] for r in period_rows})
+    yoy_dates = sorted({r["date"] for r in yoy_rows})
+    cur_map = {d: sum(r["amount"] for r in period_rows if r["date"] == d) for d in cur_dates}
+    yoy_map = {d: sum(r["amount"] for r in yoy_rows if r["date"] == d) for d in yoy_dates}
+    span = max(len(cur_dates), len(yoy_dates))
+    rows = []
+    for i in range(span):
+        row: dict = {"日": i + 1}
+        if i < len(cur_dates):
+            row[period_label] = cur_map[cur_dates[i]]
+        else:
+            row[period_label] = 0.0
+        if i < len(yoy_dates):
+            row[yoy_label] = yoy_map[yoy_dates[i]]
+        else:
+            row[yoy_label] = 0.0
+        rows.append(row)
+    return (
+        pd.DataFrame(rows),
+        f"日別売上（{period_label} vs {yoy_label}）",
+    )
+
+
+def _build_sales_yoy_weekday_amount_df(
+    period_rows: list[dict],
+    yoy_rows: list[dict],
+    period_label: str,
+    yoy_label: str,
+) -> pd.DataFrame:
+    """曜日別売上の前年同月比較（ロング形式）。"""
+    cur = _aggregate_sales_amount_by_weekday(period_rows)
+    prev = _aggregate_sales_amount_by_weekday(yoy_rows)
+    rows: list[dict] = []
+    for wd in _WEEKDAY_NAMES_JA:
+        if wd not in cur and wd not in prev:
+            continue
+        rows.append({"曜日": wd, "期間": period_label, "売上額": cur.get(wd, 0.0)})
+        rows.append({"曜日": wd, "期間": yoy_label, "売上額": prev.get(wd, 0.0)})
+    return pd.DataFrame(rows)
+
+
+def _build_sales_period_weekday_df(rows: list[dict]) -> pd.DataFrame:
+    """指定期間の曜日別売上（月〜日の順）。"""
+    wd_amounts = _aggregate_sales_amount_by_weekday(rows)
+    return pd.DataFrame(
+        [{"曜日": wd, "売上額": float(wd_amounts.get(wd, 0.0))} for wd in _WEEKDAY_NAMES_JA]
+    )
+
+
+def _render_sales_monthly_trend_chart(df: pd.DataFrame) -> None:
+    """月別売上のエリア＋折れ線チャート（水色テーマ）。"""
+    if df.empty or df["売上額"].sum() == 0:
+        st.caption("データがありません。")
+        return
     try:
         import altair as alt
 
         chart = (
-            alt.Chart(dept_df)
-            .mark_arc()
+            alt.Chart(df)
+            .mark_area(
+                line={"color": "#0284C7", "strokeWidth": 2},
+                color=alt.Gradient(
+                    gradient="linear",
+                    stops=[
+                        alt.GradientStop(color="#BAE6FD", offset=0),
+                        alt.GradientStop(color="#F0F9FF", offset=1),
+                    ],
+                    x1=1,
+                    x2=1,
+                    y1=1,
+                    y2=0,
+                ),
+                interpolate="monotone",
+            )
             .encode(
-                theta=alt.Theta("売上額:Q", stack=True),
-                color=alt.Color("部門:N", legend=alt.Legend(title="部門")),
+                x=alt.X("日付:T", title="月", axis=alt.Axis(format="%Y/%m", gridColor="#E0F2FE")),
+                y=alt.Y("売上額:Q", title="売上額", axis=alt.Axis(format=",.0f", gridColor="#E0F2FE")),
                 tooltip=[
-                    alt.Tooltip("部門:N", title="部門"),
+                    alt.Tooltip("日付:T", title="月", format="%Y年%m月"),
                     alt.Tooltip("売上額:Q", title="売上額", format=",.0f"),
+                ],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except ImportError:
+        st.line_chart(df, x="日付", y="売上額", height=320)
+
+
+def _render_sales_weekday_chart(df: pd.DataFrame) -> None:
+    """曜日別売上の棒グラフ（土日を濃い水色）。"""
+    if df.empty or df["売上額"].sum() == 0:
+        st.caption("データがありません。")
+        return
+    try:
+        import altair as alt
+
+        chart = (
+            alt.Chart(df)
+            .mark_bar(cornerRadiusEnd=5, size=28)
+            .encode(
+                x=alt.X(
+                    "曜日:N",
+                    sort=list(_WEEKDAY_NAMES_JA),
+                    title=None,
+                    axis=alt.Axis(labelAngle=0, grid=False),
+                ),
+                y=alt.Y(
+                    "売上額:Q",
+                    title="売上額",
+                    axis=alt.Axis(format=",.0f", gridColor="#E0F2FE"),
+                ),
+                color=alt.condition(
+                    (alt.datum.曜日 == "土曜日") | (alt.datum.曜日 == "日曜日"),
+                    alt.value("#0284C7"),
+                    alt.value("#7DD3FC"),
+                ),
+                tooltip=[
+                    alt.Tooltip("曜日:N", title="曜日"),
+                    alt.Tooltip("売上額:Q", title="売上額", format=",.0f"),
+                ],
+            )
+            .properties(height=340)
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except ImportError:
+        st.bar_chart(df.set_index("曜日")["売上額"], height=320)
+
+
+def _build_sales_yoy_dept_amount_df(
+    period_rows: list[dict],
+    yoy_rows: list[dict],
+    period_label: str,
+    yoy_label: str,
+    *,
+    top_n: int = 8,
+) -> pd.DataFrame:
+    """部門別売上の前年同月比較（ロング形式・上位部門）。"""
+    cur: dict[str, float] = defaultdict(float)
+    prev: dict[str, float] = defaultdict(float)
+    for r in period_rows:
+        cur[r["kategory"]] += r["amount"]
+    for r in yoy_rows:
+        prev[r["kategory"]] += r["amount"]
+    ranked = sorted(
+        set(cur) | set(prev),
+        key=lambda k: cur.get(k, 0.0) + prev.get(k, 0.0),
+        reverse=True,
+    )[:top_n]
+    rows: list[dict] = []
+    for dept in ranked:
+        rows.append({"部門": dept, "期間": period_label, "売上額": cur.get(dept, 0.0)})
+        rows.append({"部門": dept, "期間": yoy_label, "売上額": prev.get(dept, 0.0)})
+    return pd.DataFrame(rows)
+
+
+def _render_sales_yoy_line_chart(
+    df: pd.DataFrame,
+    *,
+    x_col: str,
+    period_label: str,
+    yoy_label: str,
+) -> None:
+    if df.empty or period_label not in df.columns or yoy_label not in df.columns:
+        st.caption("比較できるデータがありません。")
+        return
+    if df[period_label].sum() == 0 and df[yoy_label].sum() == 0:
+        st.caption("比較できるデータがありません。")
+        return
+    st.line_chart(df, x=x_col, y=[period_label, yoy_label], height=320)
+
+
+def _render_sales_yoy_grouped_bar(
+    df: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str = "売上額",
+    color_col: str = "期間",
+) -> None:
+    if df.empty or df[y_col].sum() == 0:
+        st.caption("比較できるデータがありません。")
+        return
+    try:
+        import altair as alt
+
+        chart = (
+            alt.Chart(df)
+            .mark_bar()
+            .encode(
+                x=alt.X(f"{x_col}:N", sort=None, title=x_col),
+                y=alt.Y(f"{y_col}:Q", title="売上額"),
+                color=alt.Color(f"{color_col}:N", title="期間"),
+                xOffset=alt.XOffset(f"{color_col}:N"),
+                tooltip=[
+                    alt.Tooltip(f"{x_col}:N", title=x_col),
+                    alt.Tooltip(f"{color_col}:N", title="期間"),
+                    alt.Tooltip(f"{y_col}:Q", title="売上額", format=",.0f"),
                 ],
             )
             .properties(height=320)
         )
         st.altair_chart(chart, use_container_width=True)
     except ImportError:
+        pivot = df.pivot(index=x_col, columns=color_col, values=y_col).fillna(0)
+        st.bar_chart(pivot, height=320)
+
+
+_PIE_TOP_LABEL_COUNT = 3
+
+
+def _build_altair_pie_with_top_labels(
+    df: pd.DataFrame,
+    *,
+    name_col: str,
+    legend_title: str,
+    outer_radius: int = 120,
+    label_radius: int = 70,
+    chart_height: int = 360,
+    legend_columns: int = 3,
+):
+    """円グラフ＋上位N件に名称・構成比ラベル（Altair）。"""
+    import altair as alt
+
+    labels = df[name_col].tolist()
+    colors = _sales_blue_gradient_for_labels(labels)
+    sort_field = alt.EncodingSortField(field="売上額", order="descending")
+    label_df = df.head(_PIE_TOP_LABEL_COUNT).copy()
+    label_df["表示ラベル"] = label_df.apply(
+        lambda r: f"{r[name_col]}\n{r['構成比']:.1f}%",
+        axis=1,
+    )
+
+    arc = (
+        alt.Chart(df)
+        .mark_arc(outerRadius=outer_radius)
+        .encode(
+            theta=alt.Theta("売上額:Q", stack=True, sort=sort_field),
+            order=alt.Order("売上額:Q", sort="descending"),
+            color=alt.Color(
+                f"{name_col}:N",
+                sort=sort_field,
+                scale=alt.Scale(domain=labels, range=colors),
+                legend=alt.Legend(
+                    title=legend_title,
+                    orient="bottom",
+                    direction="horizontal",
+                    columns=min(legend_columns, max(1, len(labels))),
+                    symbolSize=80,
+                    labelLimit=120,
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip(f"{name_col}:N", title=legend_title),
+                alt.Tooltip("売上額:Q", title="売上額", format=",.0f"),
+                alt.Tooltip("構成比:Q", title="構成比", format=".1f"),
+            ],
+        )
+    )
+    text = (
+        alt.Chart(label_df)
+        .mark_text(radius=label_radius, size=10, color="#0C4A6E", lineBreak="\n")
+        .encode(
+            theta=alt.Theta("売上額:Q", stack=True, sort=sort_field),
+            order=alt.Order("売上額:Q", sort="descending"),
+            text="表示ラベル:N",
+        )
+    )
+    return (arc + text).properties(height=chart_height)
+
+
+def _render_sales_dept_pie_chart(dept_df: pd.DataFrame) -> None:
+    """部門1（sales_category）別売上の円グラフ。構成比の大きい順。"""
+    if dept_df.empty or dept_df["売上額"].sum() == 0:
+        st.caption("データがありません。")
+        return
+
+    df = dept_df.sort_values("売上額", ascending=False).reset_index(drop=True)
+    labels = df["部門"].tolist()
+    colors = _sales_blue_gradient_for_labels(labels)
+    total = float(df["売上額"].sum())
+    df = df.copy()
+    df["構成比"] = df["売上額"] / total * 100.0
+
+    try:
+        import altair as alt
+
+        chart = _build_altair_pie_with_top_labels(
+            df,
+            name_col="部門",
+            legend_title="部門1",
+            outer_radius=130,
+            label_radius=78,
+            chart_height=380,
+            legend_columns=3,
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except ImportError:
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(6, 4))
+        fig, ax = plt.subplots(figsize=(8, 5))
         ax.pie(
-            dept_df["売上額"],
-            labels=dept_df["部門"],
+            df["売上額"],
+            labels=df["部門"],
             autopct="%1.1f%%",
             startangle=90,
+            counterclock=False,
+            colors=colors,
         )
         ax.axis("equal")
+        ax.legend(
+            df["部門"],
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.05),
+            ncol=min(3, len(df)),
+            fontsize=10,
+            frameon=False,
+        )
+        fig.subplots_adjust(bottom=0.18)
         st.pyplot(fig)
         plt.close(fig)
 
 
-def render_sales_dashboard_page() -> None:
-    st.title("📈 売上ダッシュボード")
+def _render_sales_product_pie_chart(
+    product_df: pd.DataFrame,
+    *,
+    name_col: str = "商品名",
+    legend_title: str | None = None,
+) -> None:
+    """売上構成の円グラフ。構成比の大きい順。"""
+    if product_df.empty or product_df["売上額"].sum() == 0:
+        st.caption("データがありません。")
+        return
+
+    legend = legend_title or name_col
+    df = product_df.sort_values("売上額", ascending=False).reset_index(drop=True)
+    labels = df[name_col].tolist()
+    colors = _sales_blue_gradient_for_labels(labels)
+    total = float(df["売上額"].sum())
+    df = df.copy()
+    df["構成比"] = df["売上額"] / total * 100.0
+
+    try:
+        chart = _build_altair_pie_with_top_labels(
+            df,
+            name_col=name_col,
+            legend_title=legend,
+            outer_radius=105,
+            label_radius=62,
+            chart_height=340,
+            legend_columns=2,
+        )
+        st.altair_chart(chart, use_container_width=True)
+    except ImportError:
+        st.caption("グラフ表示には altair のインストールが必要です。")
+
+
+_SALES_BLUE_GRADIENT: tuple[str, ...] = (
+    "#0284C7",
+    "#38BDF8",
+    "#7DD3FC",
+    "#BAE6FD",
+    "#E0F2FE",
+    "#F0F9FF",
+)
+
+
+def _sales_blue_gradient_for_labels(labels: list[str]) -> list[str]:
+    """売上順ラベルに薄い水色グラデーションを割り当て（「その他」は最薄）。"""
+    colors: list[str] = []
+    rank = 0
+    for name in labels:
+        if name == "その他":
+            colors.append(_SALES_BLUE_GRADIENT[-1])
+        else:
+            colors.append(_SALES_BLUE_GRADIENT[min(rank, len(_SALES_BLUE_GRADIENT) - 2)])
+            rank += 1
+    return colors
+
+
+_SALES_LIGHT_CYAN_RGB_START = (56, 189, 248)  # #38BDF8
+_SALES_LIGHT_CYAN_RGB_END = (240, 249, 255)  # #F0F9FF
+
+
+def _sales_light_cyan_for_labels(
+    labels: list[str],
+    *,
+    rank_offset: int = 0,
+    rank_total: int | None = None,
+) -> list[str]:
+    """薄い水色グラデーション（1位=やや濃い水色、下位=より薄い、「その他」=最薄）。"""
+    products = [name for name in labels if name != "その他"]
+    total = rank_total if rank_total is not None else len(products)
+    colors_map: dict[str, str] = {}
+    product_rank = 0
+    for name in labels:
+        if name == "その他":
+            colors_map[name] = "#F0F9FF"
+            continue
+        if total <= 1:
+            t = 0.0
+        else:
+            t = (rank_offset + product_rank) / (total - 1)
+        r = int(
+            _SALES_LIGHT_CYAN_RGB_START[0]
+            + (_SALES_LIGHT_CYAN_RGB_END[0] - _SALES_LIGHT_CYAN_RGB_START[0]) * t
+        )
+        g = int(
+            _SALES_LIGHT_CYAN_RGB_START[1]
+            + (_SALES_LIGHT_CYAN_RGB_END[1] - _SALES_LIGHT_CYAN_RGB_START[1]) * t
+        )
+        b = int(
+            _SALES_LIGHT_CYAN_RGB_START[2]
+            + (_SALES_LIGHT_CYAN_RGB_END[2] - _SALES_LIGHT_CYAN_RGB_START[2]) * t
+        )
+        colors_map[name] = f"#{r:02x}{g:02x}{b:02x}"
+        product_rank += 1
+    return [colors_map[name] for name in labels]
+
+
+def _category2_chart_display_order(df: pd.DataFrame) -> pd.DataFrame:
+    """横棒用: 売上1位を上、「その他」は最下段。"""
+    others = df[df["商品名"] == "その他"]
+    products = df[df["商品名"] != "その他"].sort_values("売上額", ascending=False)
+    if others.empty:
+        return products.reset_index(drop=True)
+    return pd.concat([products, others], ignore_index=True)
+
+
+def _category2_bar_y_sort(panel_df: pd.DataFrame) -> list[str]:
+    """Y軸ソート: 構成比降順（上=最大）。「その他」は常に最下段。"""
+    products = panel_df[panel_df["商品名"] != "その他"].sort_values("構成比", ascending=False)
+    order = products["商品名"].tolist()
+    if "その他" in panel_df["商品名"].values:
+        order.append("その他")
+    return order
+
+
+def _render_category2_bar_panel(
+    display_df: pd.DataFrame,
+    *,
+    total: float,
+    rank_offset: int = 0,
+    rank_total: int | None = None,
+) -> None:
+    """横棒1列分（Altair・売上割合の大きい順＝上から、薄い水色）。"""
+    if display_df.empty:
+        st.caption("データがありません。")
+        return
+
+    panel_df = display_df.copy()
+    panel_df["構成比"] = panel_df["売上額"] / total * 100.0
+    panel_df["金額ラベル"] = panel_df.apply(
+        lambda r: f"¥{r['売上額']:,.0f}（{r['構成比']:.1f}%）",
+        axis=1,
+    )
+
+    try:
+        import altair as alt
+    except ImportError:
+        st.caption("グラフ表示には altair のインストールが必要です。")
+        return
+
+    y_sort = _category2_bar_y_sort(panel_df)
+    color_order = [
+        name
+        for name in panel_df.sort_values("構成比", ascending=False)["商品名"].tolist()
+        if name != "その他"
+    ]
+    if "その他" in panel_df["商品名"].values:
+        color_order.append("その他")
+    cyan_colors = _sales_light_cyan_for_labels(
+        color_order,
+        rank_offset=rank_offset,
+        rank_total=rank_total,
+    )
+    bar_height = max(220, 30 * len(panel_df))
+    bars = (
+        alt.Chart(panel_df)
+        .mark_bar(size=20, cornerRadiusEnd=3)
+        .encode(
+            x=alt.X(
+                "構成比:Q",
+                title="構成比 (%)",
+                axis=alt.Axis(format=".1f", gridColor="#BAE6FD"),
+            ),
+            y=alt.Y(
+                "商品名:N",
+                sort=y_sort,
+                title=None,
+                axis=alt.Axis(labelLimit=240, labelColor="#0C4A6E"),
+            ),
+            color=alt.Color(
+                "商品名:N",
+                sort=y_sort,
+                scale=alt.Scale(domain=color_order, range=cyan_colors),
+                legend=None,
+            ),
+            tooltip=[
+                alt.Tooltip("商品名:N", title="商品名"),
+                alt.Tooltip("売上額:Q", title="売上額", format=",.0f"),
+                alt.Tooltip("構成比:Q", title="構成比", format=".1f"),
+            ],
+        )
+    )
+    labels_layer = (
+        alt.Chart(panel_df)
+        .mark_text(align="left", baseline="middle", dx=5, fontSize=10, color="#0C4A6E")
+        .encode(
+            x=alt.X("構成比:Q"),
+            y=alt.Y("商品名:N", sort=y_sort),
+            text="金額ラベル:N",
+        )
+    )
+    st.altair_chart((bars + labels_layer).properties(height=bar_height), use_container_width=True)
+
+
+def _render_sales_category2_product_rank_chart(
+    df: pd.DataFrame,
+    *,
+    two_columns: bool = False,
+) -> None:
+    """カテゴリ2別・売れ筋商品（横棒＋構成比、薄い水色）。"""
+    if df.empty or df["売上額"].sum() == 0:
+        st.caption("データがありません。")
+        return
+
+    total = float(df["売上額"].sum())
+    ranked_df = df.sort_values("売上額", ascending=False).reset_index(drop=True)
+    ranked_df = ranked_df.copy()
+    ranked_df["構成比"] = ranked_df["売上額"] / total * 100.0
+    display_df = _category2_chart_display_order(ranked_df)
+    rank_total = len(display_df)
+
+    use_two_cols = two_columns and len(display_df) > 1
+    if use_two_cols:
+        mid = (len(display_df) + 1) // 2
+        left_df = display_df.iloc[:mid].reset_index(drop=True)
+        right_df = display_df.iloc[mid:].reset_index(drop=True)
+        col_l, col_r = st.columns(2)
+        with col_l:
+            _render_category2_bar_panel(
+                left_df,
+                total=total,
+                rank_offset=0,
+                rank_total=rank_total,
+            )
+        with col_r:
+            _render_category2_bar_panel(
+                right_df,
+                total=total,
+                rank_offset=mid,
+                rank_total=rank_total,
+            )
+    else:
+        _render_category2_bar_panel(display_df, total=total, rank_total=rank_total)
+
+
+_SALES_DASHBOARD_CATEGORY2_TOP_N_DEFAULT = 5
+_SALES_DASHBOARD_CATEGORY2_TOP_N_BY_GROUP: dict[str, int] = {
+    "焼肉": 34,  # 35位未満を「その他」（上位34商品を個別表示）
+    "ステーキ": 11,  # 12位未満を「その他」（上位11商品を個別表示）
+}
+_SALES_DASHBOARD_CATEGORY2_TWO_COLUMN_GROUPS = frozenset({"焼肉"})
+
+
+def _category2_top_n_for_group(group_label: str) -> int:
+    return _SALES_DASHBOARD_CATEGORY2_TOP_N_BY_GROUP.get(
+        group_label,
+        _SALES_DASHBOARD_CATEGORY2_TOP_N_DEFAULT,
+    )
+
+_SALES_DASHBOARD_CATEGORY2_GROUPS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("セット商品", ("セット",), "product_name"),
+    ("焼肉", ("焼肉",), "category2"),
+    (
+        "すきやき・しゃぶしゃぶ",
+        (
+            "すきやき・しゃぶしゃぶ",
+            "すき焼き・しゃぶしゃぶ",
+            "すきやきしゃぶしゃぶ",
+            "すき焼きしゃぶしゃぶ",
+        ),
+        "category2",
+    ),
+    ("ステーキ", ("ステーキ",), "category2"),
+)
+
+_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_GROUPS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("豚肉", ("豚肉",), "category2"),
+    ("弁当", ("弁当",), "category2"),
+    ("惣菜", ("惣菜",), "category1"),
+    ("揚げ物", ("揚げ物",), "category2"),
+)
+_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_TOP_N = 10
+
+# 後方互換（旧名）
+_SALES_DASHBOARD_CATEGORY2_PIE_GROUPS = _SALES_DASHBOARD_CATEGORY2_GROUPS
+
+
+def _normalize_category2_for_match(text: str) -> str:
+    """カテゴリ2の表記ゆれ（空白・中点など）を吸収。"""
+    return re.sub(r"[\s　・./／\-－_]+", "", str(text or "").strip())
+
+
+def _record_matches_category2_group(category2: str, needles: tuple[str, ...]) -> bool:
+    c = _normalize_category2_for_match(category2)
+    if not c:
+        return False
+    for needle in needles:
+        n = _normalize_category2_for_match(needle)
+        if n and (n == c or n in c or c in n):
+            return True
+    return False
+
+
+_SALES_SET_PRODUCT_NEEDLE = "セット"
+
+
+def _is_set_product_name(product_name: str) -> bool:
+    return _record_matches_product_name_group(product_name, (_SALES_SET_PRODUCT_NEEDLE,))
+
+
+def _record_matches_category2_exact(category2: str, needles: tuple[str, ...]) -> bool:
+    """カテゴリ2が needle と一致（表記ゆれのみ吸収）。"""
+    c = _normalize_category2_for_match(category2)
+    if not c:
+        return False
+    for needle in needles:
+        n = _normalize_category2_for_match(needle)
+        if n and n == c:
+            return True
+    return False
+
+
+def _record_matches_product_name_group(product_name: str, needles: tuple[str, ...]) -> bool:
+    """商品名に指定語句が含まれるか（セット商品用）。"""
+    name = str(product_name or "").strip()
+    if not name:
+        return False
+    return any(needle and needle in name for needle in needles)
+
+
+def _build_category2_top_product_pie_df(
+    rows: list[dict],
+    *,
+    needles: tuple[str, ...],
+    match_by: str = "category2",
+    top_n: int = 5,
+    exclude_set_products: bool = False,
+    category2_exact: bool = False,
+    include_all: bool = False,
+) -> pd.DataFrame:
+    """カテゴリ2または商品名で絞り込み、商品別売上 Top N（残りは「その他」）。"""
+    totals: dict[str, float] = defaultdict(float)
+    for r in rows:
+        product_name = str(r.get("product_name") or "（未設定）")
+        if match_by == "product_name":
+            if not _record_matches_product_name_group(product_name, needles):
+                continue
+        else:
+            cat2 = str(r.get("sales_category2") or "").strip()
+            if category2_exact:
+                matched = _record_matches_category2_exact(cat2, needles)
+            else:
+                matched = _record_matches_category2_group(cat2, needles)
+            if not matched:
+                continue
+            if exclude_set_products and _is_set_product_name(product_name):
+                continue
+        totals[product_name] += r["amount"]
+    if not totals:
+        return pd.DataFrame(columns=["商品名", "売上額"])
+    ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    if include_all:
+        return pd.DataFrame([{"商品名": name, "売上額": amt} for name, amt in ranked])
+    top = ranked[:top_n]
+    other = sum(amt for _, amt in ranked[top_n:])
+    out = [{"商品名": name, "売上額": amt} for name, amt in top]
+    if other > 0:
+        out.append({"商品名": "その他", "売上額": other})
+    return pd.DataFrame(out)
+
+
+def _build_category1_product_pie_df(
+    rows: list[dict],
+    *,
+    needles: tuple[str, ...],
+    top_n: int = 10,
+    exclude_set_products: bool = True,
+) -> pd.DataFrame:
+    """部門1（sales_category）で絞り込み、商品名別 Top N（残りは「その他」）。"""
+    totals: dict[str, float] = defaultdict(float)
+    for r in rows:
+        cat1 = _sales_category1_label(r)
+        if cat1 == "（未設定）":
+            continue
+        if not _record_matches_category2_group(cat1, needles):
+            continue
+        product_name = str(r.get("product_name") or "（未設定）")
+        if exclude_set_products and _is_set_product_name(product_name):
+            continue
+        totals[product_name] += r["amount"]
+    if not totals:
+        return pd.DataFrame(columns=["商品名", "売上額"])
+    ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+    top = ranked[:top_n]
+    other = sum(amt for _, amt in ranked[top_n:])
+    out = [{"商品名": name, "売上額": amt} for name, amt in top]
+    if other > 0:
+        out.append({"商品名": "その他", "売上額": other})
+    return pd.DataFrame(out)
+
+
+def _render_category2_quick_pie_section(rows: list[dict], *, period_label: str) -> None:
+    """豚肉・弁当・惣菜・揚げ物の売れ筋円グラフ（ステーキの下）。"""
+    st.markdown(f"**カテゴリ別 売れ筋構成（{period_label}）**")
     st.caption(
+        f"豚肉・弁当・揚げ物は `{SUPABASE_TABLE_SALES_PRODUCTS}.{SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN}` で絞り"
+        f"商品別 Top {_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_TOP_N}、"
+        f"惣菜のみ `{SUPABASE_TABLE_SALES_PRODUCTS}.{SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN}` が「惣菜」の商品を"
+        f"商品名別 Top {_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_TOP_N} で表示します。"
+    )
+    pie_cols = st.columns(2)
+    for i, (group_label, needles, match_by) in enumerate(_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_GROUPS):
+        with pie_cols[i % 2]:
+            st.markdown(f"**{group_label}**")
+            if match_by == "category1":
+                pie_df = _build_category1_product_pie_df(
+                    rows,
+                    needles=needles,
+                    top_n=_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_TOP_N,
+                )
+            else:
+                pie_df = _build_category2_top_product_pie_df(
+                    rows,
+                    needles=needles,
+                    match_by=match_by,
+                    top_n=_SALES_DASHBOARD_CATEGORY2_QUICK_PIE_TOP_N,
+                    exclude_set_products=(match_by == "category2"),
+                )
+            if pie_df.empty:
+                st.caption("該当データがありません。")
+            else:
+                total = pie_df["売上額"].sum()
+                st.caption(f"売上合計 ¥{total:,.0f}")
+                _render_sales_product_pie_chart(pie_df)
+
+
+def _inject_sales_dashboard_styles() -> None:
+    """売上ダッシュボードの画面表示・PDF印刷用スタイル。"""
+    st.markdown(
+        """
+        <style>
+        .sales-dashboard-print-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            padding: 0.45rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #fff;
+            background: linear-gradient(135deg, #0284C7, #38BDF8);
+            border: none;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            box-shadow: 0 1px 3px rgba(2, 132, 199, 0.35);
+        }
+        .sales-dashboard-print-btn:hover {
+            background: linear-gradient(135deg, #0369A1, #0284C7);
+        }
+        .sales-dashboard-print-control {
+            max-width: 240px;
+            min-height: 52px;
+            margin-bottom: 0.25rem;
+        }
+        .sales-dashboard-print-control iframe {
+            border: none !important;
+            min-height: 52px !important;
+            height: 52px !important;
+        }
+        div:has(> iframe.sales-dashboard-print-frame),
+        div:has(iframe[title="streamlit.components.v1.html"]) {
+            min-height: 52px !important;
+        }
+        .sales-dashboard-print-header {
+            border-bottom: 2px solid #BAE6FD;
+            margin-bottom: 0.75rem;
+            padding-bottom: 0.5rem;
+        }
+        .print-only { display: none !important; }
+        div[data-testid="stMetric"] {
+            background: #F0F9FF;
+            border: 1px solid #BAE6FD;
+            border-radius: 0.5rem;
+            padding: 0.65rem 0.85rem;
+        }
+        .sales-dashboard-kpi-amount-box {
+            background: #F0F9FF;
+            border: 1px solid #BAE6FD;
+            border-radius: 0.5rem;
+            padding: 1rem 1.25rem;
+            min-height: 5.5rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .sales-dashboard-kpi-label {
+            color: #64748B;
+            font-size: 0.875rem;
+            font-weight: 500;
+            margin-bottom: 0.35rem;
+        }
+        .sales-dashboard-kpi-value {
+            color: #0C4A6E;
+            font-size: 2.25rem;
+            font-weight: 700;
+            line-height: 1.2;
+            word-break: break-all;
+        }
+        .sales-dashboard-section-title {
+            margin-top: 0.25rem;
+            margin-bottom: 0.5rem;
+        }
+        .sales-dashboard-section-heading {
+            color: #0C4A6E;
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin: 0 0 0.35rem 0;
+            padding-left: 0.55rem;
+            border-left: 4px solid #38BDF8;
+        }
+        .sales-dashboard-section-heading-sub {
+            color: #64748B;
+            font-size: 0.78rem;
+            margin: 0 0 0.75rem 0;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: linear-gradient(180deg, #FFFFFF 0%, #F8FCFF 100%);
+            border-color: #BAE6FD !important;
+            border-radius: 0.65rem;
+            padding: 0.35rem 0.15rem;
+        }
+        @media print {
+            @page { size: A4 portrait; margin: 8mm; }
+            .print-only { display: block !important; }
+            header[data-testid="stHeader"],
+            [data-testid="stSidebar"],
+            [data-testid="stToolbar"],
+            [data-testid="stStatusWidget"],
+            footer,
+            .sales-dashboard-no-print,
+            .sales-dashboard-print-control,
+            section.main iframe {
+                display: none !important;
+            }
+            .st-key-sales_dashboard_reload,
+            .st-key-sales_dashboard_period_mode,
+            .st-key-sales_dashboard_year_pick,
+            .st-key-sales_dashboard_month_pick,
+            .st-key-sales_dashboard_day_range {
+                display: none !important;
+            }
+            [data-testid="stAlert"] { display: none !important; }
+            section.main {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+            section.main .block-container {
+                max-width: 100% !important;
+                padding: 0 !important;
+            }
+            div[data-testid="stVerticalBlockBorderWrapper"] {
+                break-inside: avoid;
+                page-break-inside: avoid;
+                margin-bottom: 6px;
+            }
+            [data-testid="column"] {
+                break-inside: avoid;
+                page-break-inside: avoid;
+            }
+            section.main [data-testid="stVerticalBlock"] {
+                gap: 0.35rem !important;
+            }
+            h1 {
+                font-size: 14pt !important;
+                margin: 0 0 4px !important;
+                padding: 0 !important;
+            }
+            h2 {
+                font-size: 12pt !important;
+                margin: 8px 0 4px !important;
+                padding: 0 !important;
+            }
+            h3, h4, h5 {
+                font-size: 10pt !important;
+                margin: 4px 0 2px !important;
+            }
+            hr {
+                border-color: #CBD5E1;
+                margin: 6px 0 !important;
+            }
+            p, [data-testid="stCaptionContainer"], label {
+                font-size: 8pt !important;
+                margin: 0 !important;
+            }
+            div[data-testid="stMetric"] {
+                background: #fff !important;
+                border: 1px solid #CBD5E1 !important;
+                box-shadow: none !important;
+                padding: 0.35rem 0.5rem !important;
+            }
+            div[data-testid="stMetricValue"] {
+                font-size: 11pt !important;
+            }
+            div[data-testid="stMetricLabel"] {
+                font-size: 8pt !important;
+            }
+            .sales-dashboard-kpi-amount-box {
+                background: #fff !important;
+                border: 1px solid #CBD5E1 !important;
+                padding: 0.35rem 0.5rem !important;
+                min-height: 0 !important;
+            }
+            .sales-dashboard-kpi-label {
+                font-size: 8pt !important;
+                margin-bottom: 0 !important;
+            }
+            .sales-dashboard-kpi-value {
+                font-size: 14pt !important;
+            }
+            .sales-dashboard-print-header {
+                margin-bottom: 0.35rem !important;
+                padding-bottom: 0.15rem !important;
+            }
+            .sales-dashboard-print-header h2 {
+                font-size: 12pt !important;
+            }
+            .sales-dashboard-print-header p {
+                font-size: 8pt !important;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_sales_dashboard_print_bar(*, period_label: str) -> None:
+    """PDF印刷ボタンと印刷時のみ表示するヘッダー。"""
+    generated = datetime.now().strftime("%Y/%m/%d %H:%M")
+    st.markdown(
+        f"""
+        <div class="sales-dashboard-print-header print-only">
+            <h2 style="margin:0;font-size:1.25rem;">売上ダッシュボード</h2>
+            <p style="margin:0.35rem 0 0;font-size:0.95rem;">対象期間: {period_label}</p>
+            <p style="margin:0.2rem 0 0;font-size:0.8rem;color:#64748B;">出力日時: {generated}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    pc, _ = st.columns([2, 5])
+    with pc:
+        st.markdown('<div class="sales-dashboard-print-control">', unsafe_allow_html=True)
+        components.html(
+            """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <style>
+              html, body {
+                margin: 0;
+                padding: 0;
+                height: 52px;
+                overflow: hidden;
+              }
+              button {
+                width: 100%;
+                min-height: 44px;
+                padding: 0.5rem 1rem;
+                font-size: 0.875rem;
+                font-weight: 600;
+                color: #fff;
+                background: linear-gradient(135deg, #0284C7, #38BDF8);
+                border: none;
+                border-radius: 0.5rem;
+                cursor: pointer;
+                box-shadow: 0 1px 3px rgba(2, 132, 199, 0.35);
+                box-sizing: border-box;
+                white-space: nowrap;
+              }
+              button:hover {
+                background: linear-gradient(135deg, #0369A1, #0284C7);
+              }
+            </style>
+            </head>
+            <body>
+            <button type="button" id="salesDashboardPrintBtn">🖨️ PDF印刷</button>
+            <script>
+            (function () {
+                const btn = document.getElementById("salesDashboardPrintBtn");
+                if (!btn || btn.dataset.bound) return;
+                btn.dataset.bound = "1";
+                btn.addEventListener("click", function () {
+                    const target = window.top || window.parent || window;
+                    target.focus();
+                    setTimeout(function () { target.print(); }, 350);
+                });
+            })();
+            </script>
+            </body>
+            </html>
+            """,
+            height=52,
+            scrolling=False,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown(
+        '<p class="sales-dashboard-no-print" style="color:#64748B;font-size:0.8rem;margin:0.35rem 0 0;">'
+        "何度でも印刷できます。A4縦・複数ページでも見やすいレイアウトで出力します（プレビューで確認してください）。"
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_sales_dashboard_page() -> None:
+    _inject_sales_dashboard_styles()
+    st.title("📈 売上ダッシュボード")
+    st.markdown(
+        '<p class="sales-dashboard-no-print" style="color:#64748B;font-size:0.875rem;margin-top:0;">'
         f"Supabase の `{SUPABASE_TABLE_SALES}` を集計します。"
         "カレンダーで年別・月別・日別の期間を指定できます（データは直近36ヶ月分を保持）。"
+        "</p>",
+        unsafe_allow_html=True,
     )
 
     client = get_supabase_client_for_writes()
@@ -2607,49 +4245,50 @@ def render_sales_dashboard_page() -> None:
     month_default = today.replace(day=1)
     range_default = (month_default, today)
 
-    st.subheader("期間の指定")
-    period_mode = st.radio(
-        "集計単位",
-        ["年別", "月別", "日別"],
-        horizontal=True,
-        key="sales_dashboard_period_mode",
-    )
+    with st.container(border=True):
+        st.subheader("期間の指定")
+        period_mode = st.radio(
+            "集計単位",
+            ["年別", "月別", "日別"],
+            horizontal=True,
+            key="sales_dashboard_period_mode",
+        )
 
-    month_pick: date | None = None
-    year_pick: int | None = None
-    range_start: date | None = None
-    range_end: date | None = None
+        month_pick: date | None = None
+        year_pick: int | None = None
+        range_start: date | None = None
+        range_end: date | None = None
 
-    if period_mode == "年別":
-        picked_year = st.date_input(
-            "対象年",
-            value=date(today.year, 1, 1),
-            min_value=date(2020, 1, 1),
-            max_value=today,
-            key="sales_dashboard_year_pick",
-        )
-        year_pick = picked_year.year if isinstance(picked_year, date) else today.year
-    elif period_mode == "月別":
-        picked = st.date_input(
-            "対象月",
-            value=month_default,
-            min_value=date(2020, 1, 1),
-            max_value=today,
-            key="sales_dashboard_month_pick",
-        )
-        month_pick = picked.replace(day=1) if isinstance(picked, date) else month_default
-    else:
-        picked_range = st.date_input(
-            "対象期間",
-            value=range_default,
-            min_value=date(2020, 1, 1),
-            max_value=today,
-            key="sales_dashboard_day_range",
-        )
-        try:
-            range_start, range_end = _parse_date_input_range(picked_range)
-        except TypeError:
-            range_start, range_end = range_default
+        if period_mode == "年別":
+            picked_year = st.date_input(
+                "対象年",
+                value=date(today.year, 1, 1),
+                min_value=date(2020, 1, 1),
+                max_value=today,
+                key="sales_dashboard_year_pick",
+            )
+            year_pick = picked_year.year if isinstance(picked_year, date) else today.year
+        elif period_mode == "月別":
+            picked = st.date_input(
+                "対象月",
+                value=month_default,
+                min_value=date(2020, 1, 1),
+                max_value=today,
+                key="sales_dashboard_month_pick",
+            )
+            month_pick = picked.replace(day=1) if isinstance(picked, date) else month_default
+        else:
+            picked_range = st.date_input(
+                "対象期間",
+                value=range_default,
+                min_value=date(2020, 1, 1),
+                max_value=today,
+                key="sales_dashboard_day_range",
+            )
+            try:
+                range_start, range_end = _parse_date_input_range(picked_range)
+            except TypeError:
+                range_start, range_end = range_default
 
     period_rows, comparison_rows, period_label, comparison_label = dashboard_filter_records(
         records,
@@ -2659,18 +4298,32 @@ def render_sales_dashboard_page() -> None:
         range_start=range_start,
         range_end=range_end,
     )
+    yoy_rows, yoy_comparison_rows, yoy_period_label, yoy_comparison_label = (
+        sales_dashboard_yoy_comparison(
+            records,
+            period_mode,
+            month_pick=month_pick,
+            year_pick=year_pick,
+            range_start=range_start,
+            range_end=range_end,
+        )
+    )
 
     period_total = sum(r["amount"] for r in period_rows)
-    prev_total = sum(r["amount"] for r in comparison_rows)
-    period_count = len(period_rows)
-    period_kategories = len({r["kategory"] for r in period_rows})
+    if period_mode in ("月別", "日別"):
+        kpi_comparison_rows = yoy_comparison_rows
+        kpi_comparison_label = yoy_comparison_label
+    else:
+        kpi_comparison_rows = comparison_rows
+        kpi_comparison_label = comparison_label
+    prev_total = sum(r["amount"] for r in kpi_comparison_rows)
 
     compare_pct: float | None = None
     if prev_total > 0:
         compare_pct = (period_total - prev_total) / prev_total * 100.0
-        compare_delta = f"{comparison_label} ¥{prev_total:,.0f}"
+        compare_delta = f"{kpi_comparison_label} ¥{prev_total:,.0f}"
     elif period_total > 0:
-        compare_delta = f"{comparison_label}のデータなし"
+        compare_delta = f"{kpi_comparison_label}のデータなし"
     else:
         compare_delta = None
 
@@ -2679,29 +4332,32 @@ def render_sales_dashboard_page() -> None:
         compare_metric_label = "前年比"
     elif period_mode == "月別":
         amount_label = "売上額"
-        compare_metric_label = "前月比"
+        compare_metric_label = "前年同月比"
     else:
         amount_label = "期間売上額"
-        compare_metric_label = "前期間比"
+        compare_metric_label = "前年同期比"
 
-    st.subheader(f"KPI（{period_label}）")
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric(amount_label, f"¥{period_total:,.0f}")
-    with k2:
-        st.metric(
-            compare_metric_label,
-            f"{compare_pct:+.1f}%" if compare_pct is not None else "—",
-            delta=compare_delta,
-        )
-    with k3:
-        st.metric("売上件数", f"{period_count:,} 件")
-    with k4:
-        st.metric("部門数", f"{period_kategories:,}")
+    _render_sales_dashboard_print_bar(period_label=period_label)
 
-    st.divider()
-    st.subheader("月別・部門")
-    mid_l, mid_r = st.columns(2)
+    with st.container(border=True):
+        st.subheader(f"KPI（{period_label}）")
+        k1, k2 = st.columns([3, 2])
+        with k1:
+            st.markdown(
+                f"""
+                <div class="sales-dashboard-kpi-amount-box">
+                    <div class="sales-dashboard-kpi-label">{amount_label}</div>
+                    <div class="sales-dashboard-kpi-value">¥{period_total:,.0f}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with k2:
+            st.metric(
+                compare_metric_label,
+                f"{compare_pct:+.1f}%" if compare_pct is not None else "—",
+                delta=compare_delta,
+            )
 
     month_keys = sorted({r["year_month"] for r in records})
     monthly_df, trend_title = _build_sales_monthly_trend_df(
@@ -2710,113 +4366,185 @@ def render_sales_dashboard_page() -> None:
         month_keys=month_keys,
         period_mode=period_mode,
     )
+    weekday_period_df = _build_sales_period_weekday_df(period_rows)
+
+    st.subheader("売上トレンド")
+    trend_l, trend_r = st.columns(2, gap="medium")
+    with trend_l:
+        with st.container(border=True):
+            st.markdown(
+                f'<p class="sales-dashboard-section-heading">月別売上</p>'
+                f'<p class="sales-dashboard-section-heading-sub">{trend_title}</p>',
+                unsafe_allow_html=True,
+            )
+            _render_sales_monthly_trend_chart(monthly_df)
+    with trend_r:
+        with st.container(border=True):
+            st.markdown(
+                f'<p class="sales-dashboard-section-heading">曜日別売上</p>'
+                f'<p class="sales-dashboard-section-heading-sub">{period_label}</p>',
+                unsafe_allow_html=True,
+            )
+            _render_sales_weekday_chart(weekday_period_df)
 
     dept_totals: dict[str, float] = defaultdict(float)
     for r in period_rows:
-        dept_totals[r["kategory"]] += r["amount"]
+        dept_totals[_sales_category1_label(r)] += r["amount"]
     ranking = sorted(dept_totals.items(), key=lambda x: x[1], reverse=True)[:10]
     rank_df = pd.DataFrame(
         {"部門": [x[0] for x in ranking], "売上額": [x[1] for x in ranking]}
     )
 
-    with mid_l:
-        st.markdown(f"**{trend_title}**")
-        if monthly_df.empty or monthly_df["売上額"].sum() == 0:
-            st.caption("データがありません。")
-        else:
-            st.line_chart(monthly_df, x="日付", y="売上額", height=320)
-    with mid_r:
-        st.markdown(f"**部門ランキング（{period_label}）**")
-        if rank_df.empty:
-            st.caption("対象期間のデータがありません。")
-        else:
-            _render_sales_dept_pie_chart(rank_df)
+    st.subheader("部門構成")
+    with st.container(border=True):
+        st.markdown(
+            f'<p class="sales-dashboard-section-heading">部門ランキング（部門1）</p>'
+            f'<p class="sales-dashboard-section-heading-sub">{period_label}・構成比順</p>',
+            unsafe_allow_html=True,
+        )
+        dept_l, dept_r = st.columns([3, 2], gap="medium")
+        with dept_l:
+            if rank_df.empty:
+                st.caption("対象期間のデータがありません。")
+            else:
+                _render_sales_dept_pie_chart(rank_df)
+        with dept_r:
+            if not rank_df.empty:
+                rank_display = rank_df.copy()
+                total_dept = float(rank_display["売上額"].sum())
+                rank_display["構成比"] = rank_display["売上額"] / total_dept * 100.0
+                rank_display.insert(0, "順位", range(1, len(rank_display) + 1))
+                st.dataframe(
+                    rank_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "順位": st.column_config.NumberColumn(format="%d"),
+                        "売上額": st.column_config.NumberColumn(format="¥%,.0f"),
+                        "構成比": st.column_config.NumberColumn(format="%.1f%%"),
+                    },
+                )
 
     st.divider()
-    st.subheader("日別・商品")
-    bot_l, bot_r = st.columns(2)
-
-    if period_mode == "年別" and year_pick:
-        trend_df = _monthly_amounts_in_year(period_rows, year_pick).rename(columns={"仕入額": "売上額"})
-        trend_x = "月"
-        daily_title = f"月別推移（{year_pick}年）"
-    else:
-        daily_amounts: dict[str, float] = defaultdict(float)
-        for r in period_rows:
-            daily_amounts[r["date"]] += r["amount"]
-        trend_df = pd.DataFrame(
-            {
-                "日付": sorted(daily_amounts.keys()),
-                "売上額": [daily_amounts[d] for d in sorted(daily_amounts.keys())],
-            }
+    st.subheader(f"カテゴリ2別・売れ筋商品（{period_label}）")
+    for group_label, needles, match_by in _SALES_DASHBOARD_CATEGORY2_GROUPS:
+        top_n = _category2_top_n_for_group(group_label)
+        st.markdown(f"**{group_label}**")
+        pie_df = _build_category2_top_product_pie_df(
+            period_rows,
+            needles=needles,
+            match_by=match_by,
+            top_n=top_n,
+            exclude_set_products=(match_by == "category2"),
+            category2_exact=(group_label == "焼肉"),
         )
-        trend_x = "日付"
-        daily_title = (
-            f"日別推移（{period_label}）"
-            if period_mode == "日別"
-            else f"日別推移（{period_label}・月内）"
-        )
+        if pie_df.empty:
+            st.caption("該当データがありません。")
+        else:
+            total = pie_df["売上額"].sum()
+            st.caption(f"売上合計 ¥{total:,.0f}")
+            _render_sales_category2_product_rank_chart(
+                pie_df,
+                two_columns=(group_label in _SALES_DASHBOARD_CATEGORY2_TWO_COLUMN_GROUPS),
+            )
+        st.markdown("")
+        if group_label == "ステーキ":
+            _render_category2_quick_pie_section(period_rows, period_label=period_label)
+            st.markdown("")
 
-    product_totals: dict[str, float] = defaultdict(float)
-    product_qty_totals: dict[str, float] = defaultdict(float)
-    for r in period_rows:
-        product_totals[r["product_name"]] += r["amount"]
-        q = r.get("quantity")
-        if q is not None:
-            product_qty_totals[r["product_name"]] += float(q)
-    product_rank = sorted(product_totals.items(), key=lambda x: x[1], reverse=True)[:10]
-    product_total = sum(product_totals.values()) or period_total
-    has_qty = bool(product_qty_totals)
-    product_rows = []
-    for i, (name, amt) in enumerate(product_rank, start=1):
-        share = (amt / product_total * 100.0) if product_total else 0.0
-        row = {
-            "順位": i,
-            "商品名": name,
-            "売上額": amt,
-            "構成比": share,
-        }
-        if has_qty:
-            row["商品数"] = product_qty_totals.get(name)
-        product_rows.append(row)
-    product_df = pd.DataFrame(product_rows)
+    st.divider()
+    st.subheader("前年同月・同期比較")
+    bot_l, bot_r = st.columns(2, gap="medium")
+
+    amount_trend_df, amount_trend_title = _build_sales_yoy_amount_trend_df(
+        yoy_rows,
+        yoy_comparison_rows,
+        yoy_period_label,
+        yoy_comparison_label,
+        period_mode=period_mode,
+        year_pick=year_pick,
+    )
+    dept_yoy_df = _build_sales_yoy_dept_amount_df(
+        yoy_rows,
+        yoy_comparison_rows,
+        yoy_period_label,
+        yoy_comparison_label,
+    )
 
     with bot_l:
-        st.markdown(f"**{daily_title}**")
-        if not period_rows:
-            st.caption("対象期間のデータがありません。")
-        else:
-            st.line_chart(trend_df, x=trend_x, y="売上額", height=320)
-    with bot_r:
-        st.markdown(f"**商品ランキング（{period_label}）**")
-        if product_df.empty:
-            st.caption("対象期間のデータがありません。")
-        else:
-            st.dataframe(
-                product_df,
-                use_container_width=True,
-                hide_index=True,
-                height=min(420, 36 * len(product_df) + 48),
-                column_config={
-                    "順位": st.column_config.NumberColumn(format="%d"),
-                    "売上額": st.column_config.NumberColumn(format="¥%,.0f"),
-                    "商品数": st.column_config.NumberColumn(format="%,.2f"),
-                    "構成比": st.column_config.NumberColumn(format="%.1f%%"),
-                },
+        with st.container(border=True):
+            st.markdown(f"**{amount_trend_title}**")
+            trend_x = "月" if period_mode == "年別" else "日"
+            _render_sales_yoy_line_chart(
+                amount_trend_df,
+                x_col=trend_x,
+                period_label=yoy_period_label,
+                yoy_label=yoy_comparison_label,
             )
+
+    with bot_r:
+        with st.container(border=True):
+            st.markdown(
+                f"**部門別売上（{yoy_period_label} vs {yoy_comparison_label}）**"
+            )
+            _render_sales_yoy_grouped_bar(dept_yoy_df, x_col="部門")
+
+    yoy_total = sum(r["amount"] for r in yoy_rows)
+    yoy_prev_total = sum(r["amount"] for r in yoy_comparison_rows)
+    yoy_count = len(yoy_rows)
+    yoy_prev_count = len(yoy_comparison_rows)
+    insight_l, insight_m, insight_r = st.columns(3)
+    with insight_l:
+        cur_avg = (yoy_total / yoy_count) if yoy_count else 0.0
+        prev_avg = (yoy_prev_total / yoy_prev_count) if yoy_prev_count else 0.0
+        avg_pct: float | None = None
+        if prev_avg > 0:
+            avg_pct = (cur_avg - prev_avg) / prev_avg * 100.0
+        st.metric(
+            "1件あたり売上（前年同月比）",
+            f"¥{cur_avg:,.0f}",
+            delta=f"{avg_pct:+.1f}%" if avg_pct is not None else None,
+        )
+    with insight_m:
+        cnt_pct: float | None = None
+        if yoy_prev_count > 0:
+            cnt_pct = (yoy_count - yoy_prev_count) / yoy_prev_count * 100.0
+        st.metric(
+            "売上件数（前年同月比）",
+            f"{yoy_count:,} 件",
+            delta=f"{cnt_pct:+.1f}%" if cnt_pct is not None else None,
+        )
+    with insight_r:
+        if records_have_quantity(yoy_rows) or records_have_quantity(yoy_comparison_rows):
+            q_cur = sum(_record_quantity(r) or 0.0 for r in yoy_rows)
+            q_prev = sum(_record_quantity(r) or 0.0 for r in yoy_comparison_rows)
+            qty_pct: float | None = None
+            if q_prev > 0:
+                qty_pct = (q_cur - q_prev) / q_prev * 100.0
+            st.metric(
+                "販売数量（前年同月比）",
+                _format_quantity_display(q_cur),
+                delta=f"{qty_pct:+.1f}%" if qty_pct is not None else None,
+            )
+        else:
+            st.metric("販売数量", "データなし", help="CSV の商品数列で取込むと表示されます。")
 
     db_total = st.session_state.get("dashboard_sales_db_count")
     total_note = f"{len(records):,} 件"
     if db_total is not None:
         total_note = f"DB {db_total:,} 件 / 集計 {len(records):,} 件"
-    st.caption(
+    st.markdown(
+        '<p class="sales-dashboard-no-print" style="color:#64748B;font-size:0.8rem;margin-top:1rem;">'
         f"表示中: {period_label}（{len(period_rows):,} 件）｜"
         f"データ保持範囲: {month_keys[0] if month_keys else '—'} 〜 {month_keys[-1] if month_keys else '—'}（{total_note}）"
+        "</p>",
+        unsafe_allow_html=True,
     )
 
 
 ANALYST_EXAMPLE_QUESTIONS = (
     "直近3ヶ月の売上と仕入の傾向を比較してください",
+    "曜日別の売上を教えてください",
     "部門別の販売数量を教えてください",
     "取引先別の仕入額ランキングを教えてください",
     "牛肉カテゴリの売上上位20商品を教えてください",
@@ -2918,6 +4646,22 @@ _SALES_QUESTION_SKIP_TOKENS = frozenset(
         "欲しい",
         "について",
         "を教え",
+        "曜日",
+        "曜日別",
+        "月曜",
+        "火曜",
+        "水曜",
+        "木曜",
+        "金曜",
+        "土曜",
+        "日曜",
+        "月曜日",
+        "火曜日",
+        "水曜日",
+        "木曜日",
+        "金曜日",
+        "土曜日",
+        "日曜日",
     }
 )
 
@@ -2974,6 +4718,81 @@ def aggregate_quantity_by_product(records: list[dict]) -> dict[str, float]:
         if q is not None:
             prod[r["product_name"]] += q
     return dict(prod)
+
+
+def question_asks_weekday(question: str) -> bool:
+    q = question or ""
+    if "曜日" in q or "weekday" in q.lower():
+        return True
+    return any(wd in q for wd in _WEEKDAY_NAMES_JA) or any(
+        wd.replace("曜日", "曜") in q for wd in _WEEKDAY_NAMES_JA
+    )
+
+
+def match_weekdays_in_question(question: str) -> list[str]:
+    """質問に含まれる曜日名（月曜日…）を返す。"""
+    q = question or ""
+    hits: list[str] = []
+    for wd in _WEEKDAY_NAMES_JA:
+        if wd in q or wd.replace("曜日", "曜") in q:
+            hits.append(wd)
+    return list(dict.fromkeys(hits))
+
+
+def aggregate_sales_by_weekday(records: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = defaultdict(float)
+    for r in records:
+        wd = str(r.get("weekday_name") or "").strip()
+        if wd and wd != "（未設定）":
+            out[wd] += r["amount"]
+    return dict(out)
+
+
+def aggregate_quantity_by_weekday(records: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = defaultdict(float)
+    for r in records:
+        wd = str(r.get("weekday_name") or "").strip()
+        q = _record_quantity(r)
+        if wd and wd != "（未設定）" and q is not None:
+            out[wd] += q
+    return dict(out)
+
+
+def aggregate_count_by_weekday(records: list[dict]) -> dict[str, int]:
+    out: dict[str, int] = defaultdict(int)
+    for r in records:
+        wd = str(r.get("weekday_name") or "").strip()
+        if wd and wd != "（未設定）":
+            out[wd] += 1
+    return dict(out)
+
+
+def format_weekday_sales_summary_lines(records: list[dict]) -> list[str]:
+    """曜日別の売上・件数・数量サマリー行を返す。"""
+    if not records:
+        return ["（曜日別集計対象の明細がありません）"]
+    by_wd = aggregate_sales_by_weekday(records)
+    if not by_wd:
+        return ["（weekday_name / sales_date から曜日を特定できませんでした）"]
+    by_cnt = aggregate_count_by_weekday(records)
+    by_qty = aggregate_quantity_by_weekday(records)
+    total = sum(r["amount"] for r in records)
+    has_qty = records_have_quantity(records)
+    lines = [
+        f"## 曜日別売上（`{SUPABASE_TABLE_SALES}.{SUPABASE_SALES_WEEKDAY_COLUMN}` / `{SUPABASE_SALES_DATE_COLUMN}` から集計）"
+    ]
+    for wd in _WEEKDAY_NAMES_JA:
+        if wd not in by_wd:
+            continue
+        amt = by_wd[wd]
+        share = (amt / total * 100.0) if total else 0.0
+        qty_part = ""
+        if has_qty and wd in by_qty:
+            qty_part = f" / 販売数量 {_format_quantity_display(by_qty[wd])}"
+        lines.append(
+            f"- {wd}: ¥{amt:,.0f}（構成比 {share:.1f}% / {by_cnt.get(wd, 0):,} 件{qty_part}）"
+        )
+    return lines
 
 
 def parse_top_n_from_question(question: str, *, default: int = SALES_ANALYST_QUESTION_TOP_N_DEFAULT) -> int:
@@ -3135,6 +4954,80 @@ def _format_quantity_summary_sections(
     return lines
 
 
+def build_weekday_focused_sales_context(records: list[dict], question: str) -> str:
+    """曜日別売上・数量に関する質問向けの集計表。"""
+    if not question_asks_weekday(question):
+        return ""
+
+    matched = match_weekdays_in_question(question)
+    top_n = parse_top_n_from_question(question)
+    lines = [
+        "## 質問に対応する Supabase 集計（曜日別）",
+        f"曜日列: `{SUPABASE_SALES_WEEKDAY_COLUMN}` / 日付列: `{SUPABASE_SALES_DATE_COLUMN}` / 明細 {len(records):,} 件",
+        "",
+    ]
+    lines.extend(format_weekday_sales_summary_lines(records))
+
+    targets = matched if matched else list(_WEEKDAY_NAMES_JA)
+    sort_by = "quantity" if question_asks_quantity(question) and records_have_quantity(records) else "amount"
+
+    shown = 0
+    for wd in targets:
+        subset = [
+            r
+            for r in records
+            if str(r.get("weekday_name") or "").strip() == wd
+        ]
+        if not subset:
+            continue
+        shown += 1
+        wd_total = sum(r["amount"] for r in subset)
+        lines.append("")
+        lines.append(f"### {wd}の部門別売上（¥{wd_total:,.0f} / {len(subset):,} 件）")
+        dept_amt: dict[str, float] = defaultdict(float)
+        for r in subset:
+            dept_amt[r["kategory"]] += r["amount"]
+        for name, amt in sorted(dept_amt.items(), key=lambda x: x[1], reverse=True)[:top_n]:
+            share = (amt / wd_total * 100.0) if wd_total else 0.0
+            lines.append(f"- {name}: ¥{amt:,.0f}（{wd}内 {share:.1f}%）")
+
+        if any(k in question for k in ("商品", "品目", "ランキング", "上位")):
+            prod_amt: dict[str, float] = defaultdict(float)
+            prod_qty: dict[str, float] = defaultdict(float)
+            for r in subset:
+                prod_amt[r["product_name"]] += r["amount"]
+                q = _record_quantity(r)
+                if q is not None:
+                    prod_qty[r["product_name"]] += q
+            lines.append("")
+            lines.append(f"### {wd}の商品別（上位{top_n}）")
+            if sort_by == "quantity" and prod_qty:
+                ranked = sorted(prod_qty.items(), key=lambda x: x[1], reverse=True)[:top_n]
+                total_q = sum(prod_qty.values())
+                for i, (name, qty) in enumerate(ranked, start=1):
+                    share = (qty / total_q * 100.0) if total_q else 0.0
+                    amt = prod_amt.get(name, 0.0)
+                    lines.append(
+                        f"{i}. {name}: 数量 {_format_quantity_display(qty)}（{wd}内 {share:.1f}%） / 売上 ¥{amt:,.0f}"
+                    )
+            else:
+                ranked = sorted(prod_amt.items(), key=lambda x: x[1], reverse=True)[:top_n]
+                for i, (name, amt) in enumerate(ranked, start=1):
+                    share = (amt / wd_total * 100.0) if wd_total else 0.0
+                    qty_part = ""
+                    if name in prod_qty:
+                        qty_part = f" / 数量 {_format_quantity_display(prod_qty[name])}"
+                    lines.append(
+                        f"{i}. {name}: ¥{amt:,.0f}（{wd}内 {share:.1f}%{qty_part}）"
+                    )
+
+    if matched and shown == 0:
+        lines.append("")
+        lines.append(f"（指定曜日 {', '.join(matched)} に一致する明細がありません）")
+
+    return "\n".join(lines)
+
+
 def build_quantity_focused_sales_context(records: list[dict], question: str) -> str:
     """販売数量に関する質問向けの集計表。"""
     if not question_asks_quantity(question):
@@ -3177,6 +5070,8 @@ def build_quantity_focused_sales_context(records: list[dict], question: str) -> 
 
 def build_question_focused_sales_context(records: list[dict], question: str) -> str:
     """質問に含まれる部門・上位N件などに合わせ、Supabase 明細から再集計した表を付与。"""
+    if question_asks_weekday(question):
+        return build_weekday_focused_sales_context(records, question)
     if question_asks_quantity(question):
         return build_quantity_focused_sales_context(records, question)
 
@@ -3191,7 +5086,7 @@ def build_question_focused_sales_context(records: list[dict], question: str) -> 
 
     lines = [
         "## 質問に対応する Supabase 集計（sales 明細からアプリが再計算）",
-        f"データソース: `{SUPABASE_TABLE_SALES}` / 部門列 `{SUPABASE_SALES_KATEGORY_COLUMN}` / "
+        f"データソース: `{SUPABASE_TABLE_SALES}` / 部門 `{SUPABASE_TABLE_SALES_PRODUCTS}.{SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN}` / "
         f"商品列 `{SUPABASE_SALES_PRODUCTS_COLUMN}` / 数量列 `{SUPABASE_SALES_QUANTITY_COLUMN}` / "
         f"明細 {len(records):,} 件",
     ]
@@ -3212,7 +5107,7 @@ def build_question_focused_sales_context(records: list[dict], question: str) -> 
 
     if any(k in question for k in ("部門", "カテゴリ", "分類")):
         lines.append("")
-        lines.append("### Supabase 上の部門名一覧（sales_kategory）")
+        lines.append("### Supabase 上の部門名一覧（sales_products）")
         for kat in kategories:
             n_prod = len(by_dept[kat])
             amt = sum(by_dept[kat].values())
@@ -3249,9 +5144,10 @@ def build_sales_analytics_summary(records: list[dict]) -> str:
         f"明細件数: {len(records):,} 件",
         f"期間: {min_date} 〜 {max_date}",
         f"売上合計: ¥{total:,.0f}",
-        f"部門（{SUPABASE_SALES_KATEGORY_COLUMN}）数: {len(by_dept):,}",
+        f"部門（{SUPABASE_TABLE_SALES_PRODUCTS}.{SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN}）数: {len(by_dept):,}",
     ]
     lines.extend(_format_quantity_summary_sections(records, top_n=SALES_ANALYST_TOP_PRODUCTS_GLOBAL))
+    lines.extend([""] + format_weekday_sales_summary_lines(records))
     lines.extend(["", "## 月別売上"])
     month_keys = sorted(monthly.keys())
     for ym in month_keys:
@@ -3660,8 +5556,7 @@ class AnalystQueryIntent:
     sales_kategories: list[str] = field(default_factory=list)
     purchase_kategories: list[str] = field(default_factory=list)
     suppliers: list[str] = field(default_factory=list)
-    product_names: list[str] = field(default_factory=list)
-    product_phrase: str | None = None
+    weekdays: list[str] = field(default_factory=list)
     months_back: int | None = None
     year_months: list[str] = field(default_factory=list)
 
@@ -3669,35 +5564,6 @@ class AnalystQueryIntent:
 def _normalize_for_product_match(text: str) -> str:
     t = re.sub(r"[\s　]+", "", (text or "").strip())
     return re.sub(r"[【】\[\]()（）「」『』・/／\\\-_]", "", t)
-
-
-def _extract_product_phrase_from_question(question: str) -> str | None:
-    """「和牛サガリの売上金額」などから商品名らしきフレーズを抽出。"""
-    q = question.strip()
-    skip_phrases = {
-        "売上",
-        "仕入",
-        "販売",
-        "数量",
-        "金額",
-        "売上金額",
-        "仕入金額",
-        "販売数量",
-        "仕入数量",
-    }
-    patterns = (
-        r"([\u4e00-\u9fff\u30a0-\u30ff\u3040-\u309fA-Za-z0-9]+?)の(?:売上|仕入|販売|数量|金額|売上金額|仕入金額|販売数量)",
-        r"([\u4e00-\u9fff\u30a0-\u30ff\u3040-\u309fA-Za-z0-9]+?)について",
-        r"([\u4e00-\u9fff\u30a0-\u30ff\u3040-\u309fA-Za-z0-9]+?)(?:を|の)(?:教え|教えて|知りたい|確認|見せ)",
-    )
-    for pat in patterns:
-        m = re.search(pat, q)
-        if not m:
-            continue
-        phrase = _normalize_for_product_match(m.group(1))
-        if len(phrase) >= 2 and phrase not in skip_phrases:
-            return phrase
-    return None
 
 
 def _extract_keyword_tokens_from_question(question: str) -> list[str]:
@@ -3724,9 +5590,6 @@ def _extract_keyword_tokens_from_question(question: str) -> list[str]:
         "金額",
     }
     tokens: list[str] = []
-    phrase = _extract_product_phrase_from_question(question)
-    if phrase:
-        tokens.append(phrase)
     for m in re.finditer(r"[\u4e00-\u9fff\u30a0-\u30ff\u3040-\u309f]{2,}", question):
         t = _normalize_for_product_match(m.group())
         if len(t) < 2 or t in skip:
@@ -3738,61 +5601,6 @@ def _extract_keyword_tokens_from_question(question: str) -> list[str]:
             continue
         tokens.append(t)
     return list(dict.fromkeys(tokens))
-
-
-def _product_name_matches_phrase(product_name: str, phrase: str) -> bool:
-    nc = _normalize_for_product_match(product_name)
-    pc = _normalize_for_product_match(phrase)
-    if not nc or not pc:
-        return False
-    if pc in nc or nc in pc:
-        return True
-    return SequenceMatcher(None, pc, nc).ratio() >= 0.55
-
-
-def _match_products_in_question(question: str, product_names: list[str]) -> list[str]:
-    q_compact = _normalize_for_product_match(question)
-    phrase = _extract_product_phrase_from_question(question)
-    hits: list[str] = []
-    uniq = sorted({n for n in product_names if n and n != "（未設定）"}, key=len, reverse=True)
-
-    if phrase:
-        pc = _normalize_for_product_match(phrase)
-        for name in uniq:
-            nc = _normalize_for_product_match(name)
-            if pc in nc or nc in pc:
-                hits.append(name)
-        if not hits:
-            for name in nearest_product_names(phrase, list(uniq), k=8):
-                if _product_name_matches_phrase(name, phrase):
-                    hits.append(name)
-        strict = [
-            n
-            for n in hits
-            if pc in _normalize_for_product_match(n)
-            or _normalize_for_product_match(n) in pc
-        ]
-        if strict:
-            return list(dict.fromkeys(strict))
-
-    for name in uniq:
-        nc = _normalize_for_product_match(name)
-        if name in question or nc in q_compact:
-            hits.append(name)
-    for kw in _extract_keyword_tokens_from_question(question):
-        for name in uniq:
-            if name in hits:
-                continue
-            nc = _normalize_for_product_match(name)
-            if kw in nc or nc in kw:
-                hits.append(name)
-
-    if phrase and hits:
-        pc = _normalize_for_product_match(phrase)
-        narrowed = [n for n in hits if pc in _normalize_for_product_match(n)]
-        if narrowed:
-            return list(dict.fromkeys(narrowed))
-    return list(dict.fromkeys(hits))
 
 
 def _parse_months_back_from_question(question: str) -> int | None:
@@ -3814,80 +5622,12 @@ def _parse_year_months_from_question(question: str) -> list[str]:
     return found
 
 
-def _resolve_product_names_for_intent(
-    intent: AnalystQueryIntent,
-    sales_records: list[dict],
-    purchase_records: list[dict],
-) -> list[str]:
-    if intent.product_names:
-        return intent.product_names
-    if not intent.product_phrase:
-        return []
-    names = sorted(
-        {r["product_name"] for r in sales_records} | {r["product_name"] for r in purchase_records}
-    )
-    return _match_products_in_question(intent.product_phrase, names)
-
-
-def _append_product_focus_sections(
-    parts: list[str],
-    sales_records: list[dict],
-    purchase_records: list[dict],
-    intent: AnalystQueryIntent,
-) -> None:
-    """指定商品の売上・仕入を明示的に集計（商品名質問用）。"""
-    targets = _resolve_product_names_for_intent(intent, sales_records, purchase_records)
-    sales_scope = _filter_records_by_months(sales_records, intent)
-    purchase_scope = _filter_records_by_months(purchase_records, intent)
-    if not targets:
-        if not intent.product_phrase:
-            return
-        names = sorted(
-            {r["product_name"] for r in sales_records} | {r["product_name"] for r in purchase_records}
-        )
-        near = nearest_product_names(intent.product_phrase, list(names), k=5)
-        hint = f"（近い登録名: {', '.join(near)}）" if near else ""
-        parts.append(
-            f"\n---\n\n## 指定商品の集計（質問対象）\n\n"
-            f"商品「{intent.product_phrase}」に一致する登録名が見つかりませんでした。{hint}"
-        )
-        return
-    parts.append("\n---\n\n## 指定商品の集計（質問対象）")
-    for name in targets[:10]:
-        sections: list[str] = [f"### {name}"]
-        if intent.include_sales:
-            s_rows = [r for r in sales_scope if r["product_name"] == name]
-            if s_rows:
-                amt = sum(r["amount"] for r in s_rows)
-                qty = sum(_record_quantity(r) or 0.0 for r in s_rows)
-                has_qty = any(_record_quantity(r) is not None for r in s_rows)
-                sections.append(f"- 売上明細: {len(s_rows):,} 件")
-                sections.append(f"- 売上合計: ¥{amt:,.0f}")
-                if has_qty:
-                    sections.append(f"- 販売数量: {_format_quantity_display(qty)}")
-            elif sales_scope or sales_records:
-                sections.append("- 売上: 該当明細なし")
-        if intent.include_purchases:
-            p_rows = [r for r in purchase_scope if r["product_name"] == name]
-            if p_rows:
-                amt = sum(r["amount"] for r in p_rows)
-                qty = sum(_record_quantity(r) or 0.0 for r in p_rows)
-                has_qty = any(_record_quantity(r) is not None for r in p_rows)
-                sections.append(f"- 仕入明細: {len(p_rows):,} 件")
-                sections.append(f"- 仕入合計: ¥{amt:,.0f}")
-                if has_qty:
-                    sections.append(f"- 仕入数量: {_format_quantity_display(qty)}")
-            elif purchase_scope or purchase_records:
-                sections.append("- 仕入: 該当明細なし")
-        parts.append("\n".join(sections))
-
-
 def extract_analyst_query_intent(
     question: str,
     sales_records: list[dict],
     purchase_records: list[dict],
 ) -> AnalystQueryIntent:
-    """質問 → キーワード・対象ドメイン・部門/取引先/商品・期間を抽出。"""
+    """質問 → キーワード・対象ドメイン・部門/取引先・期間を抽出。"""
     asks_p = question_asks_purchases(question)
     asks_s = question_asks_sales(question)
     include_sales = asks_s or (not asks_p)
@@ -3896,14 +5636,6 @@ def extract_analyst_query_intent(
     sales_kats = sorted({r["kategory"] for r in sales_records if r.get("kategory")})
     purchase_kats = sorted({r["kategory"] for r in purchase_records if r.get("kategory")})
     suppliers = sorted({r["supplier"] for r in purchase_records if r.get("supplier")})
-    products = sorted(
-        {r["product_name"] for r in sales_records}
-        | {r["product_name"] for r in purchase_records}
-    )
-    product_phrase = _extract_product_phrase_from_question(question)
-    product_names = _match_products_in_question(question, products)
-    if product_phrase and not product_names:
-        product_names = _match_products_in_question(product_phrase, products)
 
     intent = AnalystQueryIntent(
         question=question.strip(),
@@ -3917,8 +5649,7 @@ def extract_analyst_query_intent(
         if purchase_kats
         else [],
         suppliers=match_suppliers_in_question(question, suppliers) if suppliers else [],
-        product_names=product_names,
-        product_phrase=product_phrase,
+        weekdays=match_weekdays_in_question(question),
         months_back=_parse_months_back_from_question(question),
         year_months=_parse_year_months_from_question(question),
     )
@@ -3954,21 +5685,13 @@ def filter_sales_records_for_intent(
     if not intent.include_sales:
         return []
     out = _filter_records_by_months(records, intent)
+    if intent.weekdays:
+        wd_set = set(intent.weekdays)
+        out = [r for r in out if str(r.get("weekday_name") or "").strip() in wd_set]
     if intent.sales_kategories:
         kat_set = set(intent.sales_kategories)
         out = [r for r in out if r["kategory"] in kat_set]
-    if intent.product_names:
-        prod_set = set(intent.product_names)
-        out = [r for r in out if r["product_name"] in prod_set]
-    elif intent.product_phrase:
-        pc = _normalize_for_product_match(intent.product_phrase)
-        out = [
-            r
-            for r in out
-            if pc in _normalize_for_product_match(str(r.get("product_name") or ""))
-            or _product_name_matches_phrase(str(r.get("product_name") or ""), intent.product_phrase)
-        ]
-    elif intent.keywords and not intent.sales_kategories:
+    elif intent.keywords:
         out = [r for r in out if _record_matches_keyword_filters(r, intent, domain="sales")]
     return out
 
@@ -3985,18 +5708,7 @@ def filter_purchase_records_for_intent(
     if intent.purchase_kategories:
         kat_set = set(intent.purchase_kategories)
         out = [r for r in out if r["kategory"] in kat_set]
-    if intent.product_names:
-        prod_set = set(intent.product_names)
-        out = [r for r in out if r["product_name"] in prod_set]
-    elif intent.product_phrase:
-        pc = _normalize_for_product_match(intent.product_phrase)
-        out = [
-            r
-            for r in out
-            if pc in _normalize_for_product_match(str(r.get("product_name") or ""))
-            or _product_name_matches_phrase(str(r.get("product_name") or ""), intent.product_phrase)
-        ]
-    elif intent.keywords and not intent.suppliers and not intent.purchase_kategories:
+    elif intent.keywords and not intent.suppliers:
         out = [r for r in out if _record_matches_keyword_filters(r, intent, domain="purchase")]
     return out
 
@@ -4030,16 +5742,12 @@ def format_analyst_intent_summary(intent: AnalystQueryIntent) -> str:
         lines.append(f"キーワード: {', '.join(intent.keywords)}")
     if intent.sales_kategories:
         lines.append(f"売上部門: {', '.join(intent.sales_kategories)}")
+    if intent.weekdays:
+        lines.append(f"曜日: {', '.join(intent.weekdays)}")
     if intent.purchase_kategories:
         lines.append(f"仕入部門: {', '.join(intent.purchase_kategories)}")
     if intent.suppliers:
         lines.append(f"取引先: {', '.join(intent.suppliers)}")
-    if intent.product_phrase:
-        lines.append(f"商品フレーズ: {intent.product_phrase}")
-    if intent.product_names:
-        show = intent.product_names[:8]
-        more = f" …他{len(intent.product_names) - 8}件" if len(intent.product_names) > 8 else ""
-        lines.append(f"商品: {', '.join(show)}{more}")
     return "\n".join(lines)
 
 
@@ -4101,9 +5809,6 @@ def build_query_driven_analyst_context(
         else:
             parts.append("\n---\n\n## 売上\n\n（データなし）")
 
-    if intent.product_phrase or intent.product_names:
-        _append_product_focus_sections(parts, sales_records, purchase_records, intent)
-
     pipeline_note = (
         "処理: 質問 → キーワード/部門/取引先/商品/期間の抽出 → "
         "Pythonで対象レコードを絞り込み → 集計表のみを GPT に渡す"
@@ -4151,7 +5856,11 @@ def load_sales_records_for_analyst(client: Client, *, force_refresh: bool = Fals
     """分析・予測用に Supabase から直近36ヶ月の売上を取得し正規化する。"""
     if not force_refresh:
         cached_records = st.session_state.get("analyst_sales_records")
-        if isinstance(cached_records, list) and cached_records:
+        if (
+            isinstance(cached_records, list)
+            and cached_records
+            and "weekday_name" in cached_records[0]
+        ):
             return cached_records
     rows = fetch_sales_for_dashboard(client)
     st.session_state.dashboard_sales = rows
@@ -4282,6 +5991,43 @@ def render_analyst_page() -> None:
 
     purchase_records = list(st.session_state.get("analyst_purchase_records") or [])
     sales_records = list(st.session_state.get("analyst_sales_records") or [])
+
+    st.caption(
+        "質問のたびにキーワード・部門・取引先・商品・期間で明細を絞り込み、"
+        "その集計表だけを GPT に送ります（全件の要約は送りません）。"
+    )
+
+    with st.expander("質問例（クリックで入力欄に反映）", expanded=True):
+        for i, q in enumerate(ANALYST_EXAMPLE_QUESTIONS):
+            if st.button(q, key=f"analyst_example_{i}", use_container_width=True):
+                st.session_state.analyst_pending_question = q
+                st.rerun()
+
+    if st.session_state.pop("analyst_clear_question_draft", False):
+        st.session_state["analyst_question_draft"] = ""
+
+    pending_prefill = (st.session_state.pop("analyst_pending_question", None) or "").strip()
+    if pending_prefill:
+        st.session_state["analyst_question_draft"] = pending_prefill
+
+    with st.form("analyst_ask_form", clear_on_submit=False):
+        st.text_area(
+            "質問",
+            key="analyst_question_draft",
+            height=100,
+            placeholder="仕入・売上について質問してください（例: 取引先別仕入、部門別販売数量）",
+        )
+        submitted = st.form_submit_button("分析する", type="primary")
+
+    if "analyst_messages" not in st.session_state:
+        st.session_state.analyst_messages = []
+
+    for msg in st.session_state.analyst_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    st.divider()
+    st.markdown("**データ・直近の分析条件**")
     st.caption(
         f"分析対象: 仕入 {n_purchase:,} 件 / 売上 {n_sales:,} 件"
         f"（モデル: `{get_openai_chat_model()}`）"
@@ -4305,28 +6051,10 @@ def render_analyst_page() -> None:
     if st.session_state.get("analyst_last_context_preview"):
         with st.expander("直近の質問で GPT に渡した集計", expanded=False):
             st.text(st.session_state.analyst_last_context_preview)
-    st.caption(
-        "質問のたびにキーワード・部門・取引先・商品・期間で明細を絞り込み、"
-        "その集計表だけを GPT に送ります（全件の要約は送りません）。"
-    )
 
-    with st.expander("質問例（クリックで入力欄に反映）", expanded=False):
-        for i, q in enumerate(ANALYST_EXAMPLE_QUESTIONS):
-            if st.button(q, key=f"analyst_example_{i}", use_container_width=True):
-                st.session_state.analyst_pending_question = q
-                st.rerun()
-
-    if "analyst_messages" not in st.session_state:
-        st.session_state.analyst_messages = []
-
-    for msg in st.session_state.analyst_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    pending = (st.session_state.pop("analyst_pending_question", None) or "").strip()
-    prompt = pending or st.chat_input(
-        "仕入・売上について質問してください（例: 取引先別仕入、部門別販売数量）"
-    )
+    prompt = ""
+    if submitted:
+        prompt = (st.session_state.get("analyst_question_draft") or "").strip()
     if not prompt:
         return
 
@@ -4352,6 +6080,7 @@ def render_analyst_page() -> None:
 
     st.session_state.analyst_messages.append({"role": "user", "content": prompt})
     st.session_state.analyst_messages.append({"role": "assistant", "content": reply})
+    st.session_state.analyst_clear_question_draft = True
     st.rerun()
 
 
@@ -4453,22 +6182,86 @@ def sales_to_display_rows(rows: list[dict]) -> list[dict]:
     """売上一覧表示用に日本語キーへ。"""
     date_col = SUPABASE_SALES_DATE_COLUMN
     products_col = SUPABASE_SALES_PRODUCTS_COLUMN
-    kategory_col = SUPABASE_SALES_KATEGORY_COLUMN
     amt_col = SUPABASE_SALES_AMOUNT_COLUMN
     qty_col = SUPABASE_SALES_QUANTITY_COLUMN
+    wd_col = SUPABASE_SALES_WEEKDAY_COLUMN
     out: list[dict] = []
     for r in rows:
         raw_qty = r.get(qty_col)
+        product_name = str(r.get("product_name") or r.get(products_col) or "").strip()
+        department = str(r.get("kategory") or "").strip()
+        if not department and SUPABASE_SALES_KATEGORY_COLUMN:
+            department = str(r.get(SUPABASE_SALES_KATEGORY_COLUMN) or "").strip()
+        date_iso = normalize_purchase_date_to_iso(str(r.get(date_col) or "").strip())
+        weekday = str(r.get(wd_col) or "").strip()
+        if not weekday:
+            weekday = weekday_name_from_iso_date(date_iso)
+        category2 = str(r.get("sales_category2") or "").strip()
+        if not category2:
+            master = _sales_nested_master_dict(r)
+            if master:
+                category2 = str(master.get("sales_category2") or "").strip()
         out.append(
             {
                 "id": r.get("id"),
-                "日付": normalize_purchase_date_to_iso(str(r.get(date_col) or "").strip()),
-                "商品名": r.get(products_col),
-                "部門": r.get(kategory_col),
+                "日付": date_iso,
+                "曜日": weekday,
+                "商品名": product_name,
+                "部門": department,
+                "カテゴリ2": category2,
                 "商品数": _format_quantity_display(raw_qty) if raw_qty is not None else "",
                 "売上金額": r.get(amt_col),
             }
         )
+    return out
+
+
+def aggregate_sales_rows_by_product(rows: list[dict]) -> list[dict]:
+    """売上検索結果を商品名で集計し、売上金額の降順で返す。"""
+    products_col = SUPABASE_SALES_PRODUCTS_COLUMN
+    amt_col = SUPABASE_SALES_AMOUNT_COLUMN
+    qty_col = SUPABASE_SALES_QUANTITY_COLUMN
+    buckets: dict[str, dict] = {}
+
+    for r in rows:
+        name = (
+            str(r.get("product_name") or r.get(products_col) or "").strip() or "（未設定）"
+        )
+        bucket = buckets.setdefault(
+            name,
+            {"amount": 0.0, "quantity": 0.0, "count": 0, "has_qty": False, "kategories": set()},
+        )
+        raw_amt = r.get(amt_col)
+        amount = float(_coerce_sales_amount(raw_amt) or parse_money_value(raw_amt) or 0)
+        bucket["amount"] += amount
+        bucket["count"] += 1
+        qty = _coerce_quantity_value(r.get(qty_col))
+        if qty is not None:
+            bucket["quantity"] += qty
+            bucket["has_qty"] = True
+        kat = str(r.get("kategory") or "").strip()
+        if not kat and SUPABASE_SALES_KATEGORY_COLUMN:
+            kat = str(r.get(SUPABASE_SALES_KATEGORY_COLUMN) or "").strip()
+        if kat:
+            bucket["kategories"].add(kat)
+
+    ranked = sorted(buckets.items(), key=lambda x: x[1]["amount"], reverse=True)
+    out: list[dict] = []
+    for i, (name, data) in enumerate(ranked, start=1):
+        row: dict = {
+            "順位": i,
+            "商品名": name,
+            "件数": data["count"],
+            "売上金額": data["amount"],
+        }
+        kats = sorted(data["kategories"])
+        if len(kats) == 1:
+            row["部門"] = kats[0]
+        elif len(kats) > 1:
+            row["部門"] = " / ".join(kats)
+        if data["has_qty"]:
+            row["商品数"] = data["quantity"]
+        out.append(row)
     return out
 
 
@@ -4541,7 +6334,7 @@ def render_supabase_purchases_search(widget_prefix: str, *, compact: bool = Fals
             if (has_prod or has_sup) and not rows and not cat_err:
                 st.session_state[f"{widget_prefix}_hist_hint"] = (
                     "条件に合うデータがありません。商品名は purchases.product_name、"
-                    "取引先のみの検索は products / suppliers 経由です。"
+                    "取引先のみの検索は purchase_products / suppliers 経由です。"
                 )
             else:
                 st.session_state.pop(f"{widget_prefix}_hist_hint", None)
@@ -4605,15 +6398,31 @@ def render_supabase_sales_search(widget_prefix: str, *, compact: bool = False) -
             "Supabase に接続できません。ログインするか、`.env` の `SUPABASE_URL` とキーを確認してください。"
         )
         return
+    catalog_prefetch, catalog_prefetch_err = fetch_sales_product_catalog(client)
+    cat2_choices = ["（指定なし）"] + distinct_sales_category2_choices(catalog_prefetch)
+    cat2_col_label = (
+        SUPABASE_SALES_PRODUCTS_CATEGORY2_COLUMN or "sales_category2"
+    ).strip()
+
     if compact:
-        st.caption("年月・商品名・部門のいずれか（または組み合わせ）で絞り込みます。条件なしのときは直近のみ表示します。")
+        st.caption(
+            "年月・商品名・部門・カテゴリ2のいずれか（または組み合わせ）で絞り込みます。"
+            "条件なしのときは直近のみ表示します。"
+        )
     else:
         st.caption(
             f"保存済みの `{SUPABASE_TABLE_SALES}` を参照します。RLS 使用時は **SELECT 用ポリシー**が必要です。"
             "条件なしのときは直近 200 件まで表示します。"
         )
+    if catalog_prefetch_err:
+        st.warning(f"売上商品マスタの取得に問題があります: {catalog_prefetch_err}")
+    elif not cat2_choices or cat2_choices == ["（指定なし）"]:
+        st.caption(
+            f"`{SUPABASE_TABLE_SALES_PRODUCTS}.{cat2_col_label}` が未登録のため、カテゴリ2は選択できません。"
+        )
+
     with st.form(f"sales_search_form_{widget_prefix}"):
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             ym = st.text_input(
                 "年月",
@@ -4624,6 +6433,12 @@ def render_supabase_sales_search(widget_prefix: str, *, compact: bool = False) -
             prod = st.text_input("商品名（部分一致）", key=f"{widget_prefix}_product")
         with c3:
             dept = st.text_input("部門（部分一致）", key=f"{widget_prefix}_kategory")
+        with c4:
+            cat2_pick = st.selectbox(
+                "カテゴリ2",
+                options=cat2_choices,
+                key=f"{widget_prefix}_category2",
+            )
         submitted = st.form_submit_button("検索", type="primary")
 
     if submitted:
@@ -4631,23 +6446,49 @@ def render_supabase_sales_search(widget_prefix: str, *, compact: bool = False) -
             has_ym = bool((ym or "").strip())
             has_prod = bool((prod or "").strip())
             has_dept = bool((dept or "").strip())
-            lim = 200 if not (has_ym or has_prod or has_dept) else 500
+            cat2_val = ""
+            if cat2_pick and cat2_pick != "（指定なし）":
+                cat2_val = str(cat2_pick).strip()
+            has_cat2 = bool(cat2_val)
+            lim = 200 if not (has_ym or has_prod or has_dept or has_cat2) else 500
+            catalog, cat_err = fetch_sales_product_catalog(client)
             rows = fetch_sales_filtered(
-                client, ym or "", prod or "", dept or "", limit=lim
+                client,
+                ym or "",
+                prod or "",
+                dept or "",
+                cat2_val,
+                limit=lim,
             )
             st.session_state[f"{widget_prefix}_hist_rows"] = rows
             st.session_state[f"{widget_prefix}_hist_error"] = None
             st.session_state[f"{widget_prefix}_hist_lim_note"] = lim
-            if (has_prod or has_dept) and not rows:
+            st.session_state[f"{widget_prefix}_hist_cat_warn"] = cat_err
+            if (has_prod or has_dept or has_cat2) and not rows:
+                cat_n = len(catalog)
+                diag = (
+                    f"（sales_products マスタ: {cat_n} 件"
+                    + ("、取得不可の可能性あり" if cat_n == 0 else "")
+                    + "）"
+                )
                 st.session_state[f"{widget_prefix}_hist_hint"] = (
-                    f"条件に合うデータがありません。商品名は `{SUPABASE_SALES_PRODUCTS_COLUMN}`、"
-                    f"部門は `{SUPABASE_SALES_KATEGORY_COLUMN}` で部分一致検索します。"
+                    "条件に合うデータがありません。"
+                    f"商品名は `sales.{SUPABASE_SALES_PRODUCTS_COLUMN}` または "
+                    f"`{SUPABASE_TABLE_SALES_PRODUCTS}.{SUPABASE_SALES_PRODUCTS_MASTER_NAME_COLUMN}`、"
+                    f"部門は `{SUPABASE_TABLE_SALES_PRODUCTS}.{SUPABASE_SALES_PRODUCTS_CATEGORY_COLUMN}`、"
+                    f"カテゴリ2は `{SUPABASE_TABLE_SALES_PRODUCTS}.{cat2_col_label}` "
+                    f"（いずれも `sales.{SUPABASE_SALES_PRODUCT_ID_COLUMN}` 経由）で部分一致検索します。"
+                    f" CSV 取込後のデータか、`sales_products` の SELECT 権限も確認してください。{diag}"
                 )
             else:
                 st.session_state.pop(f"{widget_prefix}_hist_hint", None)
         except Exception as e:
             st.session_state[f"{widget_prefix}_hist_rows"] = None
             st.session_state[f"{widget_prefix}_hist_error"] = str(e)
+
+    cat_warn = st.session_state.get(f"{widget_prefix}_hist_cat_warn")
+    if cat_warn:
+        st.warning(f"売上商品マスタの取得に問題があります: {cat_warn}")
 
     hint = st.session_state.get(f"{widget_prefix}_hist_hint")
     if hint:
@@ -4659,11 +6500,17 @@ def render_supabase_sales_search(widget_prefix: str, *, compact: bool = False) -
         if "row-level security" in err.lower() or "42501" in err:
             st.info(
                 "Supabase の SQL で `authenticated` ロール向けの **SELECT 用ポリシーを "
-                f'`public.{SUPABASE_TABLE_SALES}` に追加してください。'
+                f'`public.{SUPABASE_TABLE_SALES}` および `public.{SUPABASE_TABLE_SALES_PRODUCTS}` に追加してください。'
             )
             st.code(
                 f"""create policy "sales_select_authenticated"
   on public.{SUPABASE_TABLE_SALES}
+  for select
+  to authenticated
+  using (true);
+
+create policy "sales_products_select_authenticated"
+  on public.{SUPABASE_TABLE_SALES_PRODUCTS}
   for select
   to authenticated
   using (true);
@@ -4685,11 +6532,35 @@ def render_supabase_sales_search(widget_prefix: str, *, compact: bool = False) -
     if lim_note == 200:
         st.caption("条件が空のため、直近 200 件に制限して表示しています。")
     st.success(f"{len(rows)}件ヒットしました。")
+
+    summary = aggregate_sales_rows_by_product(rows)
+    total_amount = sum(r["売上金額"] for r in summary)
+    st.markdown("**商品別集計（売上金額の大きい順）**")
+    st.caption(f"{len(summary):,} 商品 / 売上合計 ¥{total_amount:,.0f}")
+    summary_cols = {
+        "順位": st.column_config.NumberColumn(format="%d"),
+        "件数": st.column_config.NumberColumn(format="%d"),
+        "売上金額": st.column_config.NumberColumn(format="¥%,.0f"),
+    }
+    if any("商品数" in r for r in summary):
+        summary_cols["商品数"] = st.column_config.NumberColumn(format="%,.2f")
+    st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True,
+        height=min(420, 36 * len(summary) + 48),
+        column_config=summary_cols,
+    )
+
+    st.markdown("**検索結果（DB明細）**")
     disp = sales_to_display_rows(rows)
     st.dataframe(
         disp,
         use_container_width=True,
         height=min(520, max(200, 32 * min(len(disp), 18) + 40)),
+        column_config={
+            "売上金額": st.column_config.NumberColumn(format="¥%,.0f"),
+        },
     )
 
 
@@ -5616,7 +7487,7 @@ if nav_section == "仕入" and page == "伝票読み取り":
                     f"`{SUPABASE_TABLE_PRODUCTS}` から有効な行が0件でした。"
                     f"列名（`SUPABASE_PRODUCTS_NAME_COLUMN` / `SUPABASE_PRODUCTS_SUPPLIER_COLUMN`）と "
                     f"`{SUPABASE_TABLE_SUPPLIERS}` の紐付けを確認してください。"
-                    "RLS で SELECT が拒否されている場合は `products` に **authenticated 向け SELECT ポリシー**を追加してください。"
+                    "RLS で SELECT が拒否されている場合は `purchase_products` に **authenticated 向け SELECT ポリシー**を追加してください。"
                 )
         with c_btn:
             if pc and st.button("商品マスタ再読込", key="reload_product_names"):

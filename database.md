@@ -1,18 +1,3 @@
-## Table `products`
-
-仕入商品マスタ
-
-### Columns
-
-| Name | Type | Constraints |
-|------|------|-------------|
-| `id` | `int8` | Primary Identity |
-| `created_at` | `timestamptz` |  |
-| `product_id` | `text` |  Nullable |
-| `product_name` | `varchar` |  Nullable |
-| `unit` | `unit` |  |
-| `supplier_id` | `int8` |  Nullable |
-
 ## Table `purchases`
 
 ### Columns
@@ -32,9 +17,9 @@
 | `kategory` | `text` |  Nullable |
 | `product_name` | `text` |  Nullable |
 
-## Table `sales`
+## Table `purchase_products`
 
-売上
+仕入商品マスタ
 
 ### Columns
 
@@ -42,11 +27,9 @@
 |------|------|-------------|
 | `id` | `int8` | Primary Identity |
 | `created_at` | `timestamptz` |  |
-| `sales_date` | `date` |  Nullable |
-| `sales_products` | `text` |  Nullable |
-| `sales_kategory` | `text` |  Nullable |
-| `quantity` | `numeric` |  Nullable |
-| `sales_amount` | `int8` |  Nullable |
+| `product_name` | `varchar` |  Nullable |
+| `unit` | `unit` |  |
+| `supplier_id` | `int8` |  Nullable |
 
 ## Table `suppliers`
 
@@ -59,4 +42,35 @@
 | `id` | `int8` | Primary Identity |
 | `created_at` | `timestamptz` |  |
 | `name` | `text` |  Nullable |
+
+## Table `sales`
+
+売上
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `int8` | Primary Identity |
+| `created_at` | `timestamptz` |  |
+| `sales_date` | `date` |  Nullable |
+| `sales_products` | `text` |  Nullable |
+| `sales_amount` | `int8` |  Nullable |
+| `quantity` | `int8` |  Nullable |
+| `product_id` | `int8` |  Nullable |
+| `weekday_name` | `text` |  Nullable |
+
+## Table `sales_products`
+
+売上商品マスタ
+
+### Columns
+
+| Name | Type | Constraints |
+|------|------|-------------|
+| `id` | `int8` | Primary Identity |
+| `created_at` | `timestamptz` |  |
+| `sales_category` | `text` |  Nullable |
+| `sales_category2` | `text` |  Nullable |
+| `sales_products` | `text` |  Nullable |
 
